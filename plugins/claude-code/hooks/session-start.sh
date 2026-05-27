@@ -103,7 +103,7 @@ COLLECTION_DESC="${PROJECT_BASENAME} | ${PROVIDER}/${MODEL:-default}"
 ensure_memory_dir
 TODAY=$(date +%Y-%m-%d)
 NOW=$(date +%H:%M)
-MEMORY_FILE="$MEMORY_DIR/$TODAY.md"
+MEMORY_FILE="$MEMORY_BUCKET_DIR/$TODAY.md"
 if [ ! -f "$MEMORY_FILE" ] || ! grep -qF "## Session $NOW" "$MEMORY_FILE"; then
   echo -e "\n## Session $NOW\n" >> "$MEMORY_FILE"
 fi
@@ -143,16 +143,16 @@ fi
 # Always include status in systemMessage
 json_status=$(_json_encode_str "$status")
 
-# If memory dir has no .md files (other than the one we just created), nothing to inject
-if [ ! -d "$MEMORY_DIR" ] || ! ls "$MEMORY_DIR"/*.md &>/dev/null; then
+# If bucket memory dir has no .md files (other than the one we just created), nothing to inject
+if [ ! -d "$MEMORY_BUCKET_DIR" ] || ! ls "$MEMORY_BUCKET_DIR"/*.md &>/dev/null; then
   echo "{\"systemMessage\": $json_status}"
   exit 0
 fi
 
 context=""
 
-# Find the 2 most recent daily log files (sorted by filename descending).
-recent_files=$(find "$MEMORY_DIR" -maxdepth 1 -type f -name '*.md' -print 2>/dev/null | sort -r | head -2 || true)
+# Find the 2 most recent daily log files within the current repo bucket.
+recent_files=$(find "$MEMORY_BUCKET_DIR" -maxdepth 1 -type f -name '*.md' -print 2>/dev/null | sort -r | head -2 || true)
 
 if [ -n "$recent_files" ]; then
   context="# Recent Memory\n\n"

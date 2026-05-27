@@ -1,6 +1,6 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 # Shared setup for memsearch Codex CLI hooks.
-# Sourced by all hook scripts — not executed directly.
+# Sourced by all hook scripts â€” not executed directly.
 
 set -euo pipefail
 
@@ -20,7 +20,7 @@ for p in "$HOME/.local/bin" "$HOME/.cargo/bin" "$HOME/bin" "/usr/local/bin"; do
   [[ -d "$p" ]] && [[ ":$PATH:" != *":$p:"* ]] && export PATH="$p:$PATH"
 done
 
-# --- JSON helpers (jq preferred, python3 fallback) ---
+# --- JSON helpers (jq preferred, python fallback) ---
 
 # _json_val <json_string> <dotted_key> [default]
 # Extract a value from JSON. Key supports dotted notation (e.g. "info.version").
@@ -30,10 +30,10 @@ _json_val() {
   local result=""
 
   if command -v jq &>/dev/null; then
-    # Build jq filter from dotted key: "info.version" → ".info.version"
+    # Build jq filter from dotted key: "info.version" â†’ ".info.version"
     result=$(printf '%s' "$json" | jq -r ".${key} // empty" 2>/dev/null) || true
   else
-    result=$(python3 -c "
+    result=$(python -c "
 import json, sys
 try:
     obj = json.loads(sys.argv[1])
@@ -66,7 +66,7 @@ _json_encode_str() {
   if command -v jq &>/dev/null; then
     printf '%s' "$str" | jq -Rs . 2>/dev/null && return 0
   fi
-  printf '%s' "$str" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))" 2>/dev/null && return 0
+  printf '%s' "$str" | python -c "import json,sys; print(json.dumps(sys.stdin.read()))" 2>/dev/null && return 0
   # Last resort: simple quoting (no special char escaping)
   printf '"%s"' "$str"
   return 0
@@ -219,7 +219,7 @@ stop_watch() {
   fi
 }
 
-# Start memsearch watch — always stop-then-start to pick up config changes
+# Start memsearch watch â€” always stop-then-start to pick up config changes
 start_watch() {
   if [ "${MEMSEARCH_NO_WATCH:-}" = "1" ]; then
     return 0
@@ -235,7 +235,7 @@ start_watch() {
   # Detect Milvus backend from URI
   local _uri="${MILVUS_URI:-$(_memsearch config get milvus.uri 2>/dev/null || echo "")}"
 
-  # Lite (local .db): skip watch entirely — file lock prevents concurrent access.
+  # Lite (local .db): skip watch entirely â€” file lock prevents concurrent access.
   # Session-start does a one-time index() instead.
   if [[ "$_uri" != http* ]] && [[ "$_uri" != tcp* ]]; then
     return 0
@@ -277,3 +277,4 @@ cleanup_orphaned_processes() {
     fi
   fi
 }
+

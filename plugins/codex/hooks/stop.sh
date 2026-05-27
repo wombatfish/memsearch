@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 # Stop hook: extract last turn context, summarize with codex exec LLM, save to memory.
 # Uses the normal CODEX_HOME auth context with hooks disabled to prevent recursion.
 # Async: outputs {} immediately, then hands work to a detached worker.
@@ -12,7 +12,7 @@ _required_env_var() {
     voyage) echo "VOYAGE_API_KEY" ;;
     jina) echo "JINA_API_KEY" ;;
     mistral) echo "MISTRAL_API_KEY" ;;
-    *) echo "" ;;  # onnx, ollama, local — no API key needed
+    *) echo "" ;;  # onnx, ollama, local â€” no API key needed
   esac
 }
 
@@ -23,7 +23,7 @@ _latest_user_prompt_from_history() {
     return 0
   fi
 
-  python3 -c "
+  python -c "
 import json, sys
 session_id = sys.argv[1]
 history_file = sys.argv[2]
@@ -251,7 +251,7 @@ if [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
     exit 0
   fi
 
-  USER_QUESTION=$(python3 -c "
+  USER_QUESTION=$(python -c "
 import json, sys
 last_q = ''
 with open(sys.argv[1]) as f:
@@ -299,7 +299,7 @@ if [ ${#CONTENT} -gt 4000 ]; then
 fi
 
 WORK_FILE="$(mktemp "${TMPDIR:-/tmp}/memsearch-stop.XXXXXX.json")"
-python3 - "$WORK_FILE" "$NOW" "$MEMORY_FILE" "$SESSION_ID" "$TRANSCRIPT_PATH" "$CONTENT" "$USER_QUESTION" "$LAST_MSG" <<'PY'
+python - "$WORK_FILE" "$NOW" "$MEMORY_FILE" "$SESSION_ID" "$TRANSCRIPT_PATH" "$CONTENT" "$USER_QUESTION" "$LAST_MSG" <<'PY'
 from pathlib import Path
 import json
 import sys
@@ -323,3 +323,4 @@ if command -v setsid &>/dev/null; then
 else
   MEMSEARCH_PROJECT_DIR="$PROJECT_DIR" MEMSEARCH_SKIP_HOOK_STDIN=1 nohup bash "$0" --worker "$WORK_FILE" </dev/null &>/dev/null &
 fi
+

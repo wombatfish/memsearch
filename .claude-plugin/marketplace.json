@@ -1,17 +1,17 @@
-{
-  "name": "memsearch-plugins",
+﻿{
+  "name": "memsearch-local",
   "owner": {
     "name": "Zilliz",
     "email": "support@zilliz.com"
   },
   "metadata": {
-    "description": "Semantic memory search plugin for Claude Code — markdown-first, backed by Milvus",
+    "description": "Semantic memory search plugin for Claude Code â€” markdown-first, backed by Milvus",
     "version": "1.0.0"
   },
   "plugins": [
     {
       "name": "memsearch",
-      "description": "Automatic semantic memory for Claude Code — remembers what you worked on across sessions",
+      "description": "Automatic semantic memory for Claude Code â€” remembers what you worked on across sessions",
       "version": "0.4.4",
       "source": "./plugins/claude-code",
       "category": "productivity",
@@ -25,3 +25,4 @@
     }
   ]
 }
+

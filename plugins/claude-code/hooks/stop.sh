@@ -65,7 +65,7 @@ fi
 # Determine today's date and current time
 TODAY=$(date +%Y-%m-%d)
 NOW=$(date +%H:%M)
-MEMORY_FILE="$MEMORY_DIR/$TODAY.md"
+MEMORY_FILE="$MEMORY_BUCKET_DIR/$TODAY.md"
 
 # Extract session ID and last user turn UUID for progressive disclosure anchors
 SESSION_ID=$(basename "$TRANSCRIPT_PATH" .jsonl)
@@ -135,6 +135,24 @@ fi
 
 # Append as a sub-heading under the session heading written by SessionStart
 # Include HTML comment anchor for progressive disclosure (L3 transcript lookup)
+#
+# Cross-process lock: parallel Claude sessions (worktrees) may write the same
+# date file concurrently. mkdir is atomic on POSIX and NTFS; use it as a mutex.
+# 10s budget with stale-lock recovery (older than 60s = abandoned).
+LOCKDIR="${MEMORY_FILE}.lock.d"
+acquired=0
+for _ in $(seq 1 100); do
+  if mkdir "$LOCKDIR" 2>/dev/null; then
+    acquired=1
+    break
+  fi
+  # Reclaim stale lock from a crashed writer
+  if [ -d "$LOCKDIR" ] && [ -n "$(find "$LOCKDIR" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+    rmdir "$LOCKDIR" 2>/dev/null
+  fi
+  sleep 0.1
+done
+trap '[ "$acquired" = 1 ] && rmdir "$LOCKDIR" 2>/dev/null' EXIT
 {
   echo "### $NOW"
   if [ -n "$SESSION_ID" ]; then
@@ -143,6 +161,8 @@ fi
   echo "$SUMMARY"
   echo ""
 } >> "$MEMORY_FILE"
+[ "$acquired" = 1 ] && rmdir "$LOCKDIR" 2>/dev/null
+trap - EXIT
 
 # Kill any previous background index before re-indexing to avoid process accumulation
 kill_orphaned_index
