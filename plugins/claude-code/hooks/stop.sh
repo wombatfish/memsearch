@@ -153,14 +153,21 @@ for _ in $(seq 1 100); do
   sleep 0.1
 done
 trap '[ "$acquired" = 1 ] && rmdir "$LOCKDIR" 2>/dev/null' EXIT
-{
-  echo "### $NOW"
-  if [ -n "$SESSION_ID" ]; then
-    echo "<!-- session:${SESSION_ID} turn:${LAST_USER_TURN_UUID} transcript:${TRANSCRIPT_PATH} -->"
-  fi
-  echo "$SUMMARY"
-  echo ""
-} >> "$MEMORY_FILE"
+# Guard the write: on lock-acquire failure, SKIP rather than corrupt the file
+# with an unsynchronised append.
+if [ "$acquired" = 1 ]; then
+  {
+    echo "### $NOW"
+    if [ -n "$SESSION_ID" ]; then
+      echo "<!-- session:${SESSION_ID} turn:${LAST_USER_TURN_UUID} transcript:${TRANSCRIPT_PATH} -->"
+    fi
+    echo "$SUMMARY"
+    echo ""
+  } >> "$MEMORY_FILE"
+else
+  echo "[memsearch] WARNING: lock not acquired after 10s, skipping memory write for $MEMORY_FILE" >&2
+fi
+# Release before the slow, unguarded index step; trap stays armed only for a crash mid-write.
 [ "$acquired" = 1 ] && rmdir "$LOCKDIR" 2>/dev/null
 trap - EXIT
 
