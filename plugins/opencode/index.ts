@@ -19,12 +19,13 @@ import {
   existsSync,
   mkdirSync,
   readdirSync,
+  realpathSync,
 } from "node:fs";
 import { join, dirname, basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 
-const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
+const PLUGIN_DIR = dirname(realpathSync(fileURLToPath(import.meta.url)));
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -178,6 +179,19 @@ function stopCaptureDaemon(projectDir: string): void {
   }
 }
 
+function wakeMaintenance(projectDir: string, memsearchDir: string): void {
+  const runner = join(PLUGIN_DIR, "scripts", "maintenance-runner.py");
+  exec(
+    `python3 '${shellEscape(runner)}' --platform opencode ` +
+      `--project-dir '${shellEscape(projectDir)}' --memsearch-dir '${shellEscape(memsearchDir)}' &`,
+    {
+      timeout: 5000,
+      env: { ...process.env, MEMSEARCH_NO_WATCH: "1" },
+    },
+    () => { /* ignore */ }
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Plugin entry
 // ---------------------------------------------------------------------------
@@ -223,6 +237,7 @@ const MemsearchPlugin: Plugin = async ({ project, directory, worktree }) => {
   // Start capture daemon for auto-capture
   if (autoCapture) {
     startCaptureDaemon(projectDir, collectionName, memsearchCmd);
+    wakeMaintenance(projectDir, memsearchDir);
   }
 
   return {
