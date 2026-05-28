@@ -20,8 +20,9 @@ import {
   mkdirSync,
   readdirSync,
 } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -54,14 +55,24 @@ function detectMemsearchCmd(): string {
   return "memsearch";
 }
 
-/** Derive a per-project Milvus collection name via the shared script. */
+/**
+ * Derive a per-project Milvus collection name.
+ * Mirrors scripts/derive-collection.sh — kept in-process so the plugin works
+ * on Windows where invoking WSL bash with a Windows path (e.g. C:\Users\…)
+ * fails with "No such file or directory" because backslashes are eaten as
+ * shell escapes and WSL needs /mnt/c/… form anyway.
+ */
 function deriveCollectionName(projectDir: string): string {
-  const script = join(PLUGIN_DIR, "scripts", "derive-collection.sh");
   try {
-    return execSync(`bash "${script}" "${projectDir}"`, {
-      encoding: "utf-8",
-      timeout: 5000,
-    }).trim();
+    const absPath = resolve(projectDir);
+    const sanitized = basename(absPath)
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, "_")
+      .replace(/_+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .slice(0, 40);
+    const hash = createHash("sha256").update(absPath).digest("hex").slice(0, 8);
+    return `ms_${sanitized || "opencode_default"}_${hash}`;
   } catch {
     return "ms_opencode_default";
   }
