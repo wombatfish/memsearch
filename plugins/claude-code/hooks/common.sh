@@ -46,7 +46,29 @@ if [ -n "$_GIT_COMMON_DIR" ] && [ -d "$_GIT_COMMON_DIR" ]; then
   _REPO_BUCKET="$(basename "$(dirname "$_GIT_COMMON_DIR")" | tr '[:upper:]' '[:lower:]')"
 fi
 case "$_REPO_BUCKET" in ""|"/") _REPO_BUCKET="__no_repo__";; esac
-MEMORY_BUCKET_DIR="$MEMORY_DIR/$_REPO_BUCKET"
+
+# Branch segment: scope cold-start per branch. Only when inside a git repo.
+# symbolic-ref is portable (works on old git); empty + nonzero on detached HEAD.
+_BRANCH_SEG=""
+if [ "$_REPO_BUCKET" != "__no_repo__" ]; then
+  _branch="$(git symbolic-ref --short -q HEAD 2>/dev/null || echo "")"
+  if [ -z "$_branch" ]; then
+    _BRANCH_SEG="_detached"
+  else
+    # slug: lowercase; collapse anything outside [a-z0-9._-] to '-' (handles feature/x)
+    _BRANCH_SEG="$(printf '%s' "$_branch" \
+      | tr '[:upper:]' '[:lower:]' \
+      | tr -c 'a-z0-9._-' '-' \
+      | sed 's/-\{2,\}/-/g; s/^-//; s/-$//')"
+    [ -z "$_BRANCH_SEG" ] && _BRANCH_SEG="_branch"
+  fi
+fi
+
+if [ -n "$_BRANCH_SEG" ]; then
+  MEMORY_BUCKET_DIR="$MEMORY_DIR/$_REPO_BUCKET/$_BRANCH_SEG"
+else
+  MEMORY_BUCKET_DIR="$MEMORY_DIR/$_REPO_BUCKET"
+fi
 
 # Find memsearch binary: prefer PATH, fallback to uvx
 _detect_memsearch() {
