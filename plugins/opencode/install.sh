@@ -42,15 +42,27 @@ fi
 echo ""
 
 # 3. Symlink skills to ~/.agents/skills/ (OpenCode-compatible)
+# memory-recall is the unified cross-plugin skill from _shared/ — same source as
+# the Codex installer uses, so install order no longer matters. memory-config is
+# OpenCode-specific and stays in this plugin's tree.
 mkdir -p "${AGENTS_SKILLS_DIR}"
-for skill_name in memory-recall memory-config; do
+
+SHARED_SKILLS_DIR="$(cd "${SCRIPT_DIR}/../_shared/skills" && pwd)"
+
+declare -A SKILL_SOURCES=(
+  [memory-recall]="${SHARED_SKILLS_DIR}/memory-recall"
+  [memory-config]="${SCRIPT_DIR}/skills/memory-config"
+)
+
+for skill_name in "${!SKILL_SOURCES[@]}"; do
   SKILL_LINK="${AGENTS_SKILLS_DIR}/${skill_name}"
+  SKILL_SRC="${SKILL_SOURCES[$skill_name]}"
   if [ -L "${SKILL_LINK}" ] || [ -d "${SKILL_LINK}" ]; then
     echo "[SKIP] Skill already exists at ${SKILL_LINK}"
     echo "       Remove it first if you want to reinstall: rm -rf ${SKILL_LINK}"
   else
-    ln -sf "${SCRIPT_DIR}/skills/${skill_name}" "${SKILL_LINK}"
-    echo "[OK] Skill symlinked: ${SKILL_LINK} -> ${SCRIPT_DIR}/skills/${skill_name}"
+    ln -sf "${SKILL_SRC}" "${SKILL_LINK}"
+    echo "[OK] Skill symlinked: ${SKILL_LINK} -> ${SKILL_SRC}"
   fi
 done
 echo ""

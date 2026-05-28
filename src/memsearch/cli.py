@@ -3,11 +3,41 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import os
+import re
 import sys
 from pathlib import Path
 
 import click
+
+
+def _derive_collection_name(path: str) -> str:
+    """Compute Milvus collection name from a project directory path.
+
+    Hash-equivalent with plugins/*/scripts/derive-collection.sh under MSYS bash,
+    where `realpath -m` canonicalizes `C:\\X` → `C:/X` (drive-letter form, forward
+    slashes). Without this equivalence, hooks (bash) and skills (Python via this
+    subcommand) would target different collections for the same MEMSEARCH_DIR.
+    """
+    p = path if path else os.getcwd()
+    p = p.replace("\\", "/")
+    if not (len(p) >= 2 and p[1] == ":") and not p.startswith("/"):
+        p = os.getcwd().replace("\\", "/") + "/" + p
+    p = re.sub(r"/+", "/", p)
+    if len(p) > 1 and p.endswith("/") and not p.endswith(":/"):
+        p = p[:-1]
+
+    basename = p.rsplit("/", 1)[-1]
+    sanitized = basename.lower()
+    sanitized = re.sub(r"[^a-z0-9]", "_", sanitized)
+    sanitized = re.sub(r"_+", "_", sanitized)
+    sanitized = sanitized.strip("_")
+    sanitized = sanitized[:40]
+
+    h = hashlib.sha256(p.encode("utf-8")).hexdigest()[:8]
+    return f"ms_{sanitized}_{h}"
 
 from .config import (
     GLOBAL_CONFIG_PATH,
@@ -164,6 +194,18 @@ def cli() -> None:
                 stream.reconfigure(encoding="utf-8", errors="replace")
             except (AttributeError, OSError):
                 pass
+
+
+@cli.command(name="collection-name")
+@click.argument("path", required=False)
+def collection_name(path: str | None) -> None:
+    """Print the Milvus collection name derived from a project directory.
+
+    Mirrors plugins/*/scripts/derive-collection.sh so skills can resolve the
+    collection without shelling out to bash (which on Windows may dispatch to
+    WSL instead of git-bash and lose access to Windows paths/PATH).
+    """
+    click.echo(_derive_collection_name(path or ""))
 
 
 @cli.command()

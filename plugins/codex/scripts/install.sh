@@ -186,31 +186,34 @@ else
 fi
 
 # --- 2. Install skills ---
+# memory-recall is the unified cross-plugin skill from _shared/ — bundles its own
+# derive-collection.sh so it needs no install-time path substitution. memory-config
+# stays Codex-specific. Both are copied (not symlinked) so an editor opening the
+# installed file doesn't accidentally edit the repo copy.
 echo "[2/6] Installing memsearch skills..."
 mkdir -p "$HOME/.agents/skills"
 
-for skill_name in memory-recall memory-config; do
-  SKILL_SRC="$INSTALL_DIR/skills/$skill_name"
+SHARED_SKILLS_DIR="$(cd "$INSTALL_DIR/../_shared/skills" && pwd)"
+
+declare -A SKILL_SOURCES=(
+  [memory-recall]="$SHARED_SKILLS_DIR/memory-recall"
+  [memory-config]="$INSTALL_DIR/skills/memory-config"
+)
+
+for skill_name in "${!SKILL_SOURCES[@]}"; do
+  SKILL_SRC="${SKILL_SOURCES[$skill_name]}"
   SKILL_DST="$HOME/.agents/skills/$skill_name"
   if [ -d "$SKILL_DST" ] || [ -L "$SKILL_DST" ]; then
     echo "  ⚠ Existing $skill_name skill found — replacing"
     rm -rf "$SKILL_DST"
   fi
-
-  # Copy (not symlink) so we can substitute __INSTALL_DIR__ placeholder
   cp -r "$SKILL_SRC" "$SKILL_DST"
   echo "  ✓ Copied $skill_name skill to $SKILL_DST"
 done
 
-# --- 3. Replace __INSTALL_DIR__ placeholder in SKILL.md ---
-echo "[3/6] Configuring skill paths..."
-for skill_name in memory-recall memory-config; do
-  SKILL_DST="$HOME/.agents/skills/$skill_name"
-  if [ -f "$SKILL_DST/SKILL.md" ]; then
-    replace_text_in_file "$SKILL_DST/SKILL.md" "__INSTALL_DIR__" "$INSTALL_DIR"
-    echo "  ✓ Updated $skill_name SKILL.md with install path: $INSTALL_DIR"
-  fi
-done
+# --- 3. (Reserved for future per-skill configuration steps) ---
+echo "[3/6] Skill configuration..."
+echo "  ✓ No substitution needed — unified memory-recall resolves paths at runtime"
 
 # --- 4. Install or update hooks.json ---
 echo "[4/6] Configuring hooks..."
