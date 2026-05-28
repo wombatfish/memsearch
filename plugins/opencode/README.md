@@ -71,9 +71,9 @@ OpenCode Session
     ├── system.transform hook ──→ Inject recent memories
     │
     └── Tools
-        ├── memory_search ──→ memsearch search (hybrid BM25+dense)
-        ├── memory_get    ──→ memsearch expand (full context)
-        └── memory_transcript ──→ parse-transcript.py (SQLite reader)
+        ├── memsearch_search ──→ memsearch search (hybrid BM25+dense)
+        ├── memsearch_get    ──→ memsearch expand (full context)
+        └── memsearch_transcript ──→ parse-transcript.py (SQLite reader)
 ```
 
 ## Verify It Works
@@ -105,9 +105,9 @@ We discussed the authentication flow before, what was the approach?
 
 | Tool | Description |
 |------|-------------|
-| `memory_search` | Semantic search over past memories. Returns ranked chunks. |
-| `memory_get` | Expand a chunk hash to see the full markdown section. |
-| `memory_transcript` | Read original conversation from OpenCode SQLite DB, optionally centered on a turn cursor. |
+| `memsearch_search` | Semantic search over past memories. Returns ranked chunks. |
+| `memsearch_get` | Expand a chunk hash to see the full markdown section. |
+| `memsearch_transcript` | Read original conversation from OpenCode SQLite DB, optionally centered on a turn cursor. |
 
 `<project>/.memsearch/opencode-turns.db` stores derived capture checkpoints and
 turn ordering only. It is rebuildable state, not the source of truth for
@@ -115,13 +115,15 @@ transcript recall.
 
 ## Memory Files
 
-Memory is stored as markdown in `<project>/.memsearch/memory/`:
+Memory is stored as markdown under a per-repo, per-branch bucket. Default location is `<project>/.memsearch/memory/<repo>/<branch>/`. Set `MEMSEARCH_DIR` to share one root across projects (matches the Claude Code plugin convention):
 
 ```
-.memsearch/
+<MEMSEARCH_DIR or .memsearch>/
 └── memory/
-    ├── 2026-03-25.md
-    └── 2026-03-26.md
+    └── <repo>/
+        └── <branch>/
+            ├── 2026-03-25.md
+            └── 2026-03-26.md
 ```
 
 Each file contains timestamped entries with bullet-point summaries:
@@ -171,7 +173,7 @@ Leave `plugins.opencode.summarize.provider` empty or set it to `native` to keep 
 
 2. **Index**: The markdown files are indexed by memsearch into a Milvus collection (Milvus Lite by default, runs in-process).
 
-3. **Recall**: When the assistant needs historical context, it calls `memory_search` to find relevant chunks. Results can be expanded with `memory_get` or drilled into with `memory_transcript`, which reads the original transcript from OpenCode SQLite.
+3. **Recall**: When the assistant needs historical context, it calls `memsearch_search` to find relevant chunks. Results can be expanded with `memsearch_get` or drilled into with `memsearch_transcript`, which reads the original transcript from OpenCode SQLite.
 
 4. **Cold-start**: At session start, recent memory bullets are injected into the system prompt so the assistant has immediate context.
 

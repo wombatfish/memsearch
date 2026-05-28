@@ -156,6 +156,14 @@ def _common_options(f):
 @click.version_option(package_name="memsearch")
 def cli() -> None:
     """memsearch — semantic memory search for markdown knowledge bases."""
+    # Windows defaults stdout to cp1252; JSON with ensure_ascii=False crashes on
+    # non-Latin-1 chars (→, smart quotes, etc.). Reconfigure to UTF-8 once here.
+    for stream in (sys.stdout, sys.stderr):
+        if stream.encoding and stream.encoding.lower() != "utf-8":
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (AttributeError, OSError):
+                pass
 
 
 @cli.command()

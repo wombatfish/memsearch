@@ -446,6 +446,7 @@ def capture_session_turns(
     memsearch_cmd: str,
     db_path: str,
     tail_turn_cache: dict[str, TailTurnObservation] | None = None,
+    project_dir: str | None = None,
 ) -> bool:
     """Capture all newly completed turns for a single session."""
     state = load_turn_state(turn_db, session_id)
@@ -456,9 +457,13 @@ def capture_session_turns(
 
     after_time = state.last_completed_time if state.last_completed_time > 0 else None
     if after_time is None:
-        legacy_after_time = _load_legacy_last_msg_time(str(Path(memory_dir).resolve().parent.parent))
-        if legacy_after_time > 0:
-            after_time = legacy_after_time
+        # The legacy .last_msg_time lives at <project_dir>/.memsearch/.last_msg_time.
+        # In global-scope mode memory_dir is no longer two levels under project_dir,
+        # so require the caller to pass project_dir explicitly.
+        if project_dir:
+            legacy_after_time = _load_legacy_last_msg_time(project_dir)
+            if legacy_after_time > 0:
+                after_time = legacy_after_time
     after_message_id = state.last_completed_message_id or None
     turns = build_turns(
         conn,
@@ -512,6 +517,26 @@ def main() -> None:
     parser.add_argument("project_dir", help="Project directory")
     parser.add_argument("collection_name", help="Milvus collection name")
     parser.add_argument("--memsearch-cmd", default="memsearch", help="memsearch command")
+    parser.add_argument(
+        "--memsearch-dir",
+        default=None,
+        help="Root memsearch dir (default: <project_dir>/.memsearch). "
+             "Set this to share a global dir across projects.",
+    )
+    parser.add_argument(
+        "--memory-dir",
+        default=None,
+        help="Per-repo+branch bucket dir where daily .md files are written "
+             "(default: <memsearch-dir>/memory). Caller usually passes the "
+             "bucket subdir, e.g. <memsearch-dir>/memory/<repo>/<branch>.",
+    )
+    parser.add_argument(
+        "--memory-root",
+        default=None,
+        help="Root of all memory buckets, indexed in one shot after each capture "
+             "(default: <memsearch-dir>/memory). Distinct from --memory-dir which "
+             "controls where new daily files are written.",
+    )
     parser.add_argument("--poll-interval", type=int, default=10, help="Poll interval in seconds")
     args = parser.parse_args()
 
@@ -520,7 +545,11 @@ def main() -> None:
         sys.stderr.write(f"OpenCode database not found at {db_path}\n")
         sys.exit(1)
 
-    memory_dir = os.path.join(args.project_dir, ".memsearch", "memory")
+    # Resolve dirs. memsearch_dir may be global (shared across projects);
+    # pid_file stays project-local so each project has its own daemon.
+    memsearch_dir = args.memsearch_dir or os.path.join(args.project_dir, ".memsearch")
+    memory_root = args.memory_root or os.path.join(memsearch_dir, "memory")
+    memory_dir = args.memory_dir or memory_root
     pid_file = os.path.join(args.project_dir, ".memsearch", ".capture.pid")
 
     os.makedirs(os.path.dirname(pid_file), exist_ok=True)
@@ -556,20 +585,23 @@ def main() -> None:
                         args.memsearch_cmd,
                         db_path,
                         tail_turn_cache,
+                        project_dir=args.project_dir,
                     )
                     or any_new
                 )
 
             if any_new:
+                # Index the memory ROOT (all repo/branch buckets), not just
+                # the active bucket — keeps cross-project search working.
                 os.system(
-                    f"{args.memsearch_cmd} index '{memory_dir}' "
+                    f"{args.memsearch_cmd} index '{memory_root}' "
                     f"--collection {args.collection_name} &"
                 )
                 os.system(
                     f"python3 {shlex.quote(str(Path(__file__).resolve().parent / 'maintenance-runner.py'))} "
                     f"--platform opencode "
                     f"--project-dir {shlex.quote(args.project_dir)} "
-                    f"--memsearch-dir {shlex.quote(os.path.join(args.project_dir, '.memsearch'))} &"
+                    f"--memsearch-dir {shlex.quote(memsearch_dir)} &"
                 )
         except Exception:
             pass

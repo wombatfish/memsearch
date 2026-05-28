@@ -56,11 +56,24 @@ done
 echo ""
 
 # 4. Install plugin dependencies
-echo "[INFO] Installing plugin dependencies..."
-if command -v npm &>/dev/null; then
-  (cd "${SCRIPT_DIR}" && npm install --save-dev @opencode-ai/plugin 2>/dev/null) && echo "[OK] Dependencies installed" || echo "[WARN] npm install failed — plugin may still work if OpenCode provides the SDK"
+#
+# OpenCode resolves the plugin's imports from the plugin file's own directory,
+# NOT from OpenCode's runtime. Without @opencode-ai/plugin installed beside
+# index.ts, the plugin fails to load with "Cannot find module" and registers
+# no tools at all — so we surface the failure loudly rather than swallowing it.
+echo "[INFO] Installing plugin dependencies (@opencode-ai/plugin)..."
+if command -v bun &>/dev/null; then
+  (cd "${SCRIPT_DIR}" && bun install) \
+    && echo "[OK] Dependencies installed via bun" \
+    || { echo "[ERROR] bun install failed — plugin will not load"; exit 1; }
+elif command -v npm &>/dev/null; then
+  (cd "${SCRIPT_DIR}" && npm install --save-dev @opencode-ai/plugin) \
+    && echo "[OK] Dependencies installed via npm" \
+    || { echo "[ERROR] npm install failed — plugin will not load"; exit 1; }
 else
-  echo "[WARN] npm not found — plugin may still work if @opencode-ai/plugin is available"
+  echo "[ERROR] Neither bun nor npm found — cannot install @opencode-ai/plugin."
+  echo "        OpenCode will fail to load the plugin until dependencies are installed."
+  exit 1
 fi
 echo ""
 
@@ -69,11 +82,12 @@ echo "=== Installation Complete ==="
 echo ""
 echo "The plugin will be auto-loaded next time you start OpenCode."
 echo ""
-echo "To verify, start OpenCode and check if memory_search tool appears:"
+echo "To verify, start OpenCode and check if memsearch_search tool appears:"
 echo "  opencode"
 echo ""
 echo "Optional: Add to opencode.json for npm-based install:"
 echo '  "plugin": ["memsearch-opencode"]'
 echo ""
-echo "Memory files will be stored in: <project>/.memsearch/memory/"
-echo "Collection name is derived per-project for isolation."
+echo "Memory files will be stored under <root>/memory/<repo>/<branch>/, where <root>"
+echo "is MEMSEARCH_DIR if set, otherwise <project>/.memsearch. Collection name is"
+echo "derived from the same root (shared across projects in global mode)."

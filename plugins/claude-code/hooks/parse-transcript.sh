@@ -31,6 +31,12 @@ MAX_RESULT_CHARS="${MEMSEARCH_MAX_RESULT_CHARS:-1000}"
 python3 -c '
 import json, sys
 
+# Force UTF-8 on stdin/stdout — Python on Windows uses cp1252 by default, which
+# crashes both on reading UTF-8 transcripts and on writing UTF-8 output. Must
+# come before any print() to keep stop.sh capture-pipeline alive.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 MAX_RESULT_CHARS = int(sys.argv[2])
 
 def truncate(text, max_chars):
@@ -129,7 +135,10 @@ def format_turn(lines):
 
 # --- Main ---
 transcript_path = sys.argv[1]
-with open(transcript_path) as f:
+# Force UTF-8 — Claude Code JSONL contains UTF-8 bytes (em-dashes, smart
+# quotes, pasted non-ASCII). Python on Windows defaults to cp1252 here and
+# silently crashes the stop.sh pipeline on the first non-cp1252 byte.
+with open(transcript_path, encoding="utf-8", errors="replace") as f:
     lines = f.readlines()
 
 if not lines:

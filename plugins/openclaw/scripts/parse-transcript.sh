@@ -22,6 +22,13 @@ python3 - "$TRANSCRIPT_FILE" << 'PYEOF'
 import json
 import sys
 
+# Force UTF-8 on stdout — Python on Windows defaults to cp1252 and crashes
+# print() the first time a non-cp1252 byte appears in formatted output. The
+# crash sends a traceback to stderr (discarded by the caller's 2>/dev/null),
+# returns empty stdout, and the capture pipeline silently no-ops.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 MAX_RESULT_CHARS = 1000
 
 def extract_text(content):
@@ -61,7 +68,8 @@ def main():
     transcript_file = sys.argv[1]
 
     messages = []
-    with open(transcript_file, "r") as f:
+    # Explicit UTF-8 — see stdout note above; same trap on the read side.
+    with open(transcript_file, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:

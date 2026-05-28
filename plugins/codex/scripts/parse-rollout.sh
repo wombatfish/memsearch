@@ -39,6 +39,13 @@ MAX_RESULT_CHARS="${MEMSEARCH_MAX_RESULT_CHARS:-1000}"
 python3 -c '
 import json, sys
 
+# Force UTF-8 on stdout — Python on Windows defaults to cp1252 and crashes
+# print() the first time a non-cp1252 byte appears in formatted output. That
+# crash routes the traceback to stderr (discarded by stop.sh 2>/dev/null),
+# returns empty stdout, and the capture pipeline silently no-ops.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 MAX_RESULT_CHARS = int(sys.argv[2])
 
 def truncate(text, max_chars):
@@ -137,7 +144,8 @@ def format_turn(lines):
 
 # --- Main ---
 rollout_path = sys.argv[1]
-with open(rollout_path) as f:
+# Explicit UTF-8 — see stdout note above; same trap on the read side.
+with open(rollout_path, encoding="utf-8", errors="replace") as f:
     lines = f.readlines()
 
 if not lines:
