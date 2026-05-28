@@ -41,6 +41,10 @@ if [ -n "$MEMSEARCH_CMD" ]; then
   VERSION=$($MEMSEARCH_CMD --version 2>/dev/null | sed 's/.*version //' || echo "")
 fi
 
+# Auto-start podman/Milvus stack if URI is HTTP and the port is unreachable.
+# Silent no-op for Lite mode (file URI), missing podman, or missing compose file.
+ensure_milvus_up || true
+
 # Determine required API key for the configured provider
 _required_env_var() {
   case "$1" in
@@ -89,7 +93,13 @@ COLLECTION_HINT=""
 if [ -n "$COLLECTION_NAME" ]; then
   COLLECTION_HINT=" | collection: ${COLLECTION_NAME}"
 fi
-status="[memsearch${VERSION_TAG}] embedding: ${PROVIDER}/${MODEL:-unknown} | milvus: ${MILVUS_URI:-unknown}${COLLECTION_HINT}${UPDATE_HINT}"
+AUTOSTART_TAG=""
+case "${MILVUS_AUTOSTART_STATUS:-}" in
+  started)  AUTOSTART_TAG=" (auto-started)" ;;
+  starting) AUTOSTART_TAG=" (starting…)" ;;
+  failed)   AUTOSTART_TAG=" (UNREACHABLE)" ;;
+esac
+status="[memsearch${VERSION_TAG}] embedding: ${PROVIDER}/${MODEL:-unknown} | milvus: ${MILVUS_URI:-unknown}${AUTOSTART_TAG}${COLLECTION_HINT}${UPDATE_HINT}"
 if [ "$KEY_MISSING" = true ]; then
   status+=" | ERROR: ${REQUIRED_KEY} not set — memory search disabled"
   status+=" | Tip: switch to free local embedding: memsearch config set embedding.provider onnx && memsearch index --force"

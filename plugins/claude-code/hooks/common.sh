@@ -278,3 +278,96 @@ start_watch() {
   fi
   echo $! > "$WATCH_PIDFILE"
 }
+
+# --- Podman/Milvus auto-start ---
+#
+# Probe configured Milvus URI; if unreachable, start podman machine +
+# compose stack so subsequent watch/search/index calls succeed.
+#
+# Designed to fit inside the SessionStart hook timeout (~10s) by doing a short
+# synchronous attempt for warm restarts, then backgrounding cold-start work.
+#
+# Inputs (read from caller's scope):
+#   MILVUS_URI — full URI like http://localhost:19530
+#   CLAUDE_PLUGIN_ROOT — set by Claude Code (used to locate bundled template)
+# Optional env:
+#   MEMSEARCH_PODMAN_COMPOSE       — path to docker-compose.yml
+#                                     (default $HOME/.memsearch/milvus/docker-compose.yml)
+#   MEMSEARCH_PODMAN_SYNC_TIMEOUT  — seconds to wait synchronously (default 8)
+#   MEMSEARCH_PODMAN_AUTO_INSTALL  — if "1", copy bundled template into
+#                                     $HOME/.memsearch/milvus/ when missing
+#
+# Sets MILVUS_AUTOSTART_STATUS to one of:
+#   "up"       — already reachable
+#   "started"  — was down, came up within the sync window
+#   "starting" — was down, background start kicked off (cold path)
+#   "failed"   — no podman, no compose file, and auto-install disabled
+#   "skip"     — not Server mode, nothing to do
+ensure_milvus_up() {
+  MILVUS_AUTOSTART_STATUS="skip"
+
+  case "${MILVUS_URI:-}" in http*|tcp*) ;; *) return 0 ;; esac
+
+  local _hp="${MILVUS_URI#*://}"; _hp="${_hp%%/*}"
+  local _host="${_hp%:*}"
+  local _port="${_hp##*:}"
+  [ "$_host" = "$_port" ] && _port=19530
+
+  if (exec 3<>/dev/tcp/"$_host"/"$_port") 2>/dev/null; then
+    exec 3<&- 3>&-
+    MILVUS_AUTOSTART_STATUS="up"
+    return 0
+  fi
+
+  local _compose="${MEMSEARCH_PODMAN_COMPOSE:-$HOME/.memsearch/milvus/docker-compose.yml}"
+
+  # First-run template install: only when user opted in AND target missing.
+  # Bundled template lives next to this script under ../podman/.
+  if [ ! -f "$_compose" ] && [ "${MEMSEARCH_PODMAN_AUTO_INSTALL:-}" = "1" ]; then
+    local _bundled="$(dirname "${BASH_SOURCE[0]}")/../podman/docker-compose.yml"
+    if [ -f "$_bundled" ]; then
+      mkdir -p "$(dirname "$_compose")"
+      cp "$_bundled" "$_compose" 2>/dev/null || true
+    fi
+  fi
+
+  if [ ! -f "$_compose" ] || ! command -v podman &>/dev/null; then
+    MILVUS_AUTOSTART_STATUS="failed"
+    return 1
+  fi
+
+  # `podman machine inspect` reads local JSON config files — no socket call,
+  # so it's fast even when the machine is stopped. Use it to decide warm vs
+  # cold: if the machine isn't running, `podman compose start` would hang on
+  # the socket with its own internal retry (observed ~45s) regardless of
+  # `timeout` wrapping, so we skip warm and go straight to the cold path.
+  local _machine_state
+  _machine_state=$(podman machine inspect podman-machine-default --format '{{.State}}' 2>/dev/null || echo "")
+
+  if [ "$_machine_state" = "running" ]; then
+    # Warm-restart path: containers exist but stopped, machine already running.
+    ( cd "$(dirname "$_compose")" && podman compose start &>/dev/null ) || true
+
+    local _budget="${MEMSEARCH_PODMAN_SYNC_TIMEOUT:-8}" _i=0
+    while [ "$_i" -lt "$_budget" ]; do
+      if (exec 3<>/dev/tcp/"$_host"/"$_port") 2>/dev/null; then
+        exec 3<&- 3>&-
+        MILVUS_AUTOSTART_STATUS="started"
+        return 0
+      fi
+      sleep 1
+      _i=$((_i + 1))
+    done
+  fi
+
+  # Cold path: machine stopped, or warm probe timed out. Detach the slow
+  # work and return; subsequent hooks (UserPromptSubmit, Stop) find it ready.
+  (
+    podman machine start podman-machine-default &>/dev/null || true
+    cd "$(dirname "$_compose")" && podman compose up -d &>/dev/null || true
+  ) </dev/null &>/dev/null &
+  disown 2>/dev/null || true
+
+  MILVUS_AUTOSTART_STATUS="starting"
+  return 0
+}
