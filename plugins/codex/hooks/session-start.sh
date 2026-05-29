@@ -95,14 +95,16 @@ PROJECT_BASENAME=$(basename "$PROJECT_DIR")
 COLLECTION_DESC="${PROJECT_BASENAME} | ${PROVIDER}/${MODEL:-default}"
 
 # Capture preexisting memory files before writing the new session heading.
-EXISTING_MEMORY_FILES=$(find "$MEMORY_DIR" -maxdepth 1 -type f -name '*.md' 2>/dev/null | sort || true)
+# Scoped to the per-branch bucket (where writes now land) so the count hint
+# reflects this branch's history, matching the claude-code / gemini siblings.
+EXISTING_MEMORY_FILES=$(find "$MEMORY_BUCKET_DIR" -maxdepth 1 -type f -name '*.md' 2>/dev/null | sort || true)
 EXISTING_MEMORY_COUNT=$(printf '%s\n' "$EXISTING_MEMORY_FILES" | sed '/^$/d' | wc -l | tr -d ' ')
 
 # Write session heading to today's memory file
 ensure_memory_dir
 TODAY=$(date +%Y-%m-%d)
 NOW=$(date +%H:%M)
-MEMORY_FILE="$MEMORY_DIR/$TODAY.md"
+MEMORY_FILE="$MEMORY_BUCKET_DIR/$TODAY.md"
 if [ ! -f "$MEMORY_FILE" ] || ! grep -qF "## Session $NOW" "$MEMORY_FILE"; then
   echo -e "\n## Session $NOW\n" >> "$MEMORY_FILE"
 fi
@@ -138,8 +140,8 @@ fi
 # Always include status in systemMessage
 json_status=$(_json_encode_str "$status")
 
-# If memory dir has no .md files, nothing to inject
-if [ ! -d "$MEMORY_DIR" ] || ! ls "$MEMORY_DIR"/*.md &>/dev/null; then
+# If the per-branch bucket has no .md files, nothing to inject
+if [ ! -d "$MEMORY_BUCKET_DIR" ] || ! ls "$MEMORY_BUCKET_DIR"/*.md &>/dev/null; then
   echo "{\"systemMessage\": $json_status}"
   exit 0
 fi

@@ -98,6 +98,54 @@ _MEMSEARCH_DIR_EXPLICIT="${MEMSEARCH_DIR:+true}"
 MEMSEARCH_DIR="${MEMSEARCH_DIR:-${PROJECT_DIR}/.memsearch}"
 MEMORY_DIR="$MEMSEARCH_DIR/memory"
 
+# --- Per-branch bucket under MEMORY_DIR (forked from claude-code/common.sh) ---
+# Segregate by main-repo name + branch slug so daily logs land at
+# MEMORY_DIR/<repo>/<branch>/<date>.md — matching the claude-code and gemini
+# siblings, so parallel sessions on different branches never write the same
+# file and cold-start context stays branch-scoped. Worktrees collapse to their
+# main repo via --git-common-dir. Outside any repo → __no_repo__.
+#
+# Keyed off $PROJECT_DIR, NEVER $HOOK_CWD: the Stop worker forks with
+# MEMSEARCH_PROJECT_DIR set (stop.sh), which leaves HOOK_CWD unbound — a
+# reference would trip `set -u` and silently kill the detached writer.
+_REPO_BUCKET="__no_repo__"
+_GIT_COMMON_DIR="$(git -C "$PROJECT_DIR" rev-parse --git-common-dir 2>/dev/null || echo "")"
+if [ -n "$_GIT_COMMON_DIR" ]; then
+  # --git-common-dir may be relative to PROJECT_DIR; resolve against it.
+  case "$_GIT_COMMON_DIR" in
+    /*|[A-Za-z]:*) ;;                       # already absolute (POSIX or Windows)
+    *) _GIT_COMMON_DIR="$PROJECT_DIR/$_GIT_COMMON_DIR" ;;
+  esac
+  if [ -d "$_GIT_COMMON_DIR" ]; then
+    _GIT_COMMON_DIR="$(cd "$_GIT_COMMON_DIR" && pwd)"
+    _REPO_BUCKET="$(basename "$(dirname "$_GIT_COMMON_DIR")" | LC_ALL=C tr '[:upper:]' '[:lower:]' 2>/dev/null || true)"
+  fi
+fi
+case "$_REPO_BUCKET" in ""|"/") _REPO_BUCKET="__no_repo__";; esac
+
+_BRANCH_SEG=""
+if [ "$_REPO_BUCKET" != "__no_repo__" ]; then
+  _branch="$(git -C "$PROJECT_DIR" symbolic-ref --short -q HEAD 2>/dev/null || echo "")"
+  if [ -z "$_branch" ]; then
+    _BRANCH_SEG="_detached"
+  else
+    # LC_ALL=C: BSD/macOS `tr -c` throws "Illegal byte sequence" on a non-ASCII
+    # branch name under a UTF-8 locale; with `set -e` that would abort the hook.
+    # `|| true` + the empty-check below degrade gracefully.
+    _BRANCH_SEG="$(printf '%s' "$_branch" \
+      | LC_ALL=C tr '[:upper:]' '[:lower:]' \
+      | LC_ALL=C tr -c 'a-z0-9._-' '-' \
+      | LC_ALL=C sed 's/-\{2,\}/-/g; s/^-//; s/-$//' 2>/dev/null || true)"
+    [ -z "$_BRANCH_SEG" ] && _BRANCH_SEG="_branch"
+  fi
+fi
+
+if [ -n "$_BRANCH_SEG" ]; then
+  MEMORY_BUCKET_DIR="$MEMORY_DIR/$_REPO_BUCKET/$_BRANCH_SEG"
+else
+  MEMORY_BUCKET_DIR="$MEMORY_DIR/$_REPO_BUCKET"
+fi
+
 # Find memsearch binary: prefer PATH, fallback to uvx.
 # Keep the command as an argv array so the uvx fallback is invoked safely.
 _detect_memsearch() {
@@ -129,9 +177,9 @@ else
   COLLECTION_NAME=$("$(dirname "${BASH_SOURCE[0]}")/../scripts/derive-collection.sh" "$PROJECT_DIR" 2>/dev/null || true)
 fi
 
-# Helper: ensure memory directory exists
+# Helper: ensure memory directory exists (the per-branch bucket, where writes land)
 ensure_memory_dir() {
-  mkdir -p "$MEMORY_DIR"
+  mkdir -p "$MEMORY_BUCKET_DIR"
 }
 
 # Collection description (set by session-start.sh, empty by default)
