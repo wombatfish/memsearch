@@ -121,6 +121,34 @@ When modifying hooks/skills, keep in mind:
 
 See `CLAUDE.local.md` for detailed release procedures, current versions, and operational details.
 
+## Updating a deployed build (stale-cache traps)
+
+There are **two independent deploy layers** — updating one does NOT update the other:
+1. the `memsearch` **CLI** (installed as a `uv tool`, on `PATH` at `~/.local/bin/memsearch`), and
+2. the **plugin hooks** (cached under `~/.claude/plugins/cache/<marketplace>/memsearch/<plugin-version>/hooks/`).
+
+**CLI — local / fork build.** Deploy with `uv tool install --force ".[onnx]"` from the repo root.
+- ⚠️ **uv keys its build cache by the `pyproject.toml` version.** If the version is unchanged — which it *always* is for an unpublished local/fork build — uv **reuses a cached wheel and silently installs stale code**. The install still reports `Installed …` and rewrites the shim, but the package content is old (new files like `watchlock.py` are simply absent). Cache hit = instant; a real rebuild prints `Built memsearch @ file://…`.
+- **Fix:** bump `pyproject.toml` version, **or** add `--no-cache` to force a rebuild: `uv tool install --force --no-cache ".[onnx]"`.
+- **Never trust the "Installed" message — verify by content:** e.g. `memsearch watch --help | grep -- --replace`, or inspect `~/AppData/Roaming/uv/tools/memsearch/Lib/site-packages/memsearch/`.
+- **Fork ≠ PyPI.** `uv tool install -U "memsearch[onnx]"` pulls **upstream** from PyPI (the `memsearch` name belongs to zilliztech) — it does NOT deploy a fork. Deploy a fork from the local path (`".[onnx]"`) or `git+<fork-url>@<branch>`.
+
+**Plugin hooks.** Refresh with `/plugin marketplace update <mp>` → `/plugin install memsearch@<mp>` → `/reload-plugins`.
+- ⚠️ **Same version-keying trap on the plugin side.** If `plugins/claude-code/.claude-plugin/plugin.json` version is unchanged, `/plugin install` reports `already installed globally` and may not refresh the cache. **Bump the plugin.json version** to force a new cache dir, then verify by grepping the *cached* hook (not the repo copy) for your change.
+
+**Editable venv vs deployed binary.** `uv sync` / `.venv` is an editable install (reflects edits instantly); the uv-tool `memsearch` on `PATH` is a *separate copy* that lags until reinstalled. Testing `.venv/Scripts/memsearch` is NOT testing the live binary. Several copies can coexist (`~/.local/bin` shim, `~/AppData/Roaming/uv/tools/memsearch`, `.venv`).
+
+## Operational footguns (data integrity)
+
+- **A scoped `index <path>` prunes everything outside `<path>`.** `MemSearch.index()` ends with a deleted-file GC scoped to the scanned PATHS (`core.py`). So `memsearch index <single-file>` against a whole-tree collection **deletes every other file's chunks**. To refresh one file, re-index the **whole tree** (or let the watcher do it) — never a scoped single-file `index`. Markdown is the source of truth, so a full-tree re-index restores anything pruned.
+- **`memsearch stats` (Milvus `row_count`) misleads in both directions.** It counts uncompacted tombstones (inflates after write churn) and can also *mask* real loss (stays high on tombstones while live chunks are gone). For the true count, run a distinct-key Milvus query. Reclaim tombstones with Milvus `client.compact(collection)` — **NOT** `memsearch compact`, which is unrelated (LLM summarization, destructive to raw chunks).
+- **One writer per collection.** Concurrent writers churn the index (and dup rows when embedding-model strings diverge, since `model` is in the PK). The single-writer guard is `watchlock.py` — an OS advisory lock (`fcntl.flock` POSIX / `msvcrt.locking` Windows) keyed by `(domain, collection)`; `watch` and `index` use separate domains and `--replace` for cross-platform takeover. This supersedes the old `.watch.pid` singleton and the retired `kill_orphaned_index` bash sweep.
+
+## Windows specifics
+
+- **Milvus Lite is unavailable on Windows** (`milvus-lite … ; sys_platform != 'win32'`). Windows runs server mode only; Lite-mode code paths and the Lite-dependent tests fail/skip on Windows — that is environmental, not a regression.
+- **Bash process reaping silently no-ops on Windows.** `pgrep`, `kill -0`, `kill -- -pid`, and `$!` PID files (Git Bash) do not map to native `memsearch.exe` PIDs. Cross-platform process control must live in the Python CLI (the lock), not in the shell hooks.
+
 ## Project Conventions
 
 - Uses `uv` + `pyproject.toml` for dependency management (not pip).
