@@ -1,0 +1,5 @@
+# install.sh generates hooks/hooks.json per-platform from hooks.json.template.
+# The command string is shell-specific (PowerShell `&` call-operator on Windows
+# vs /bin/sh on POSIX) and bakes in a machine-specific Git Bash path on Windows,
+# so it must NOT be committed. See README.md "Why hooks.json is generated".
+hooks/hooks.json

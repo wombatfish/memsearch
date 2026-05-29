@@ -1,0 +1,5 @@
+{
+  "name": "memsearch",
+  "version": "0.1.0",
+  "description": "Automatic persistent memory for Gemini CLI. SessionStart injects branch-scoped recent memory so a headless critic (e.g. spawned by Syndic) starts aware of recent decisions on the current git branch. Recall is handled by the shared memory-recall skill."
+}

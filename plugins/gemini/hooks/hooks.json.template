@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "@@LAUNCH@@ \"${extensionPath}/hooks/session-start.sh\"",
+            "timeout": 20000
+          }
+        ]
+      }
+    ],
+    "BeforeAgent": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "@@LAUNCH@@ \"${extensionPath}/hooks/before-agent.sh\"",
+            "timeout": 10000
+          }
+        ]
+      }
+    ]
+  }
+}
