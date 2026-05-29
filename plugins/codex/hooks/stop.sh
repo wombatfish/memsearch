@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # Stop hook: extract last turn context, summarize with codex exec LLM, save to memory.
 # Uses the normal CODEX_HOME auth context with hooks disabled to prevent recursion.
 # Async: outputs {} immediately, then hands work to a detached worker.

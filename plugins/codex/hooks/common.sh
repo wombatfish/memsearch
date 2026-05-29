@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # Shared setup for memsearch Codex CLI hooks.
 # Sourced by all hook scripts â€” not executed directly.
 

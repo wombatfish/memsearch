@@ -67,16 +67,21 @@ PY
 install_or_update_hooks_file() {
   local hooks_file="$1"
   local install_dir="$2"
+  local bash_exe="$3"
+  local windows_cmd="$4"
 
-  python3 - "$hooks_file" "$install_dir" <<'PY'
+  python3 - "$hooks_file" "$install_dir" "$bash_exe" "$windows_cmd" <<'PY'
 from pathlib import Path
 import json
 import math
 import os
+import shlex
 import sys
 
 hooks_file = Path(sys.argv[1])
 install_dir = sys.argv[2]
+bash_exe = sys.argv[3]
+windows_cmd = sys.argv[4] == "1"
 
 spec = {
     "SessionStart": {"script": "session-start.sh", "timeout": 30},
@@ -142,6 +147,11 @@ hooks = data.setdefault("hooks", {})
 
 for event, details in spec.items():
     script = details["script"]
+    script_path = f"{install_dir}/hooks/{script}"
+    if windows_cmd:
+        command = f'cmd /c {bash_exe} "{script_path}"'
+    else:
+        command = f"{shlex.quote(bash_exe)} {shlex.quote(script_path)}"
     cleaned = strip_old_memsearch(hooks.get(event, []), script)
     cleaned.append(
         {
@@ -149,7 +159,7 @@ for event, details in spec.items():
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"bash {install_dir}/hooks/{script}",
+                    "command": command,
                     "timeout": details["timeout"],
                 }
             ],
@@ -220,12 +230,27 @@ echo "[4/6] Configuring hooks..."
 CODEX_DIR="$HOME/.codex"
 mkdir -p "$CODEX_DIR"
 HOOKS_FILE="$CODEX_DIR/hooks.json"
+HOOK_INSTALL_DIR="$INSTALL_DIR"
+HOOK_BASH_EXE="bash"
+HOOK_WINDOWS_CMD=0
+
+if command -v cygpath >/dev/null 2>&1; then
+  _win_install_dir="$(cygpath -m "$INSTALL_DIR" 2>/dev/null || true)"
+  _git_root="$(cygpath -m / 2>/dev/null || true)"
+  _git_bash_exe="${_git_root%/}/bin/bash.exe"
+  _win_bash_exe="$(cygpath -m -s "$_git_bash_exe" 2>/dev/null || cygpath -m "$_git_bash_exe" 2>/dev/null || true)"
+  if [[ "$_win_install_dir" =~ ^[A-Za-z]:/ ]] && [[ "$_win_bash_exe" =~ ^[A-Za-z]:/ ]]; then
+    HOOK_INSTALL_DIR="$_win_install_dir"
+    HOOK_BASH_EXE="$_win_bash_exe"
+    HOOK_WINDOWS_CMD=1
+  fi
+fi
 
 if [ -f "$HOOKS_FILE" ]; then
   echo "  ⚠ Existing hooks.json found — backing up to hooks.json.bak"
   cp "$HOOKS_FILE" "${HOOKS_FILE}.bak"
 fi
-install_or_update_hooks_file "$HOOKS_FILE" "$INSTALL_DIR"
+install_or_update_hooks_file "$HOOKS_FILE" "$HOOK_INSTALL_DIR" "$HOOK_BASH_EXE" "$HOOK_WINDOWS_CMD"
 echo "  ✓ Installed memsearch hooks in $HOOKS_FILE"
 
 # --- 5. Enable hooks feature flag ---
