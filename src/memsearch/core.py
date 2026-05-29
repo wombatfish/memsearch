@@ -161,14 +161,25 @@ class MemSearch:
                 failed += 1
                 logger.exception("Failed to index %s, skipping", f.path)
 
-        # Clean up chunks for files that no longer exist
+        # Clean up chunks for deleted files — scoped to the scanned paths so a
+        # narrow `index <subtree|file>` never prunes sources outside that scope.
+        # is_relative_to is purely lexical (no FS stat): a file root matches only
+        # itself, a dir root matches anything beneath it, and an empty/typo'd root
+        # matches nothing (no-op GC — bare `index` no longer nukes the collection).
+        # All paths are resolved-absolute (scanner resolves f.path; scope_roots
+        # resolved here), so the lexical compare is sound. The scope guard can only
+        # ever *skip* deletions, never add them — it cannot cause data loss.
+        scope_roots = [Path(p).expanduser().resolve() for p in self._paths]
         indexed_sources = self._store.indexed_sources()
         for source in indexed_sources:
-            if source not in active_sources:
-                if self._edges is not None:
-                    self._edges.delete_by_hashes(list(self._store.hashes_by_source(source)))
-                self._store.delete_by_source(source)
-                logger.info("Removed stale chunks for deleted file: %s", source)
+            if source in active_sources:
+                continue
+            if not any(Path(source).is_relative_to(r) for r in scope_roots):
+                continue
+            if self._edges is not None:
+                self._edges.delete_by_hashes(list(self._store.hashes_by_source(source)))
+            self._store.delete_by_source(source)
+            logger.info("Removed stale chunks for deleted file: %s", source)
 
         if failed:
             logger.warning("Indexed %d chunks from %d files (%d files failed)", total, len(files) - failed, failed)
