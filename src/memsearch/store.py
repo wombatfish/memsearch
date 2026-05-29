@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -218,6 +219,49 @@ class MilvusStore:
         "start_line",
         "end_line",
     ]
+
+    def dense_search(
+        self, embeddings: list[list[float]], *, top_k: int = 6, filter_expr: str = ""
+    ) -> list[list[dict[str, Any]]]:
+        """Per-vector dense COSINE search. One hit-list per input vector;
+        each hit = {"chunk_hash": str, "score": float}  (score = cosine similarity in [-1,1])."""
+        stats = self._client.get_collection_stats(self._collection)
+        if int(stats.get("row_count", 0)) == 0:
+            return [[] for _ in embeddings]
+
+        search_kwargs: dict[str, Any] = {
+            "collection_name": self._collection,
+            "data": embeddings,
+            "anns_field": "embedding",
+            "search_params": {"metric_type": "COSINE", "params": {}},
+            "limit": top_k,
+            "output_fields": ["chunk_hash"],
+        }
+        if filter_expr:
+            search_kwargs["filter"] = filter_expr
+
+        res = self._client.search(**search_kwargs)
+        return [[{"chunk_hash": h["entity"]["chunk_hash"], "score": h["distance"]} for h in hits] for hits in res]
+
+    def iter_chunks(self, *, with_embeddings: bool = False) -> Iterator[dict[str, Any]]:
+        """Yield every stored chunk via query_iterator (paginated, avoids loading the whole
+        collection at once). Includes 'embedding' in output_fields when with_embeddings=True."""
+        output_fields = list(self._QUERY_FIELDS)
+        if with_embeddings:
+            output_fields.append("embedding")
+
+        it = self._client.query_iterator(
+            collection_name=self._collection,
+            batch_size=1000,
+            filter='chunk_hash != ""',
+            output_fields=output_fields,
+        )
+        while True:
+            batch = it.next()
+            if not batch:
+                it.close()
+                break
+            yield from batch
 
     def query(self, *, filter_expr: str = "") -> list[dict[str, Any]]:
         """Retrieve chunks by scalar filter (no vector needed)."""

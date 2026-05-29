@@ -512,3 +512,50 @@ def test_dict_to_config_accepts_empty_section_dicts() -> None:
     assert cfg.embedding.provider == "openai"
     assert cfg.milvus.collection == "memsearch_chunks"
     assert cfg.watch.debounce_ms == 1500
+
+
+def test_graph_config_defaults() -> None:
+    """GraphConfig defaults should be present on a fresh MemSearchConfig()."""
+    cfg = MemSearchConfig()
+    assert cfg.graph.enabled is True
+    assert cfg.graph.edges_uri == "~/.memsearch/edges.db"
+    assert cfg.graph.weight == 0.5
+    assert cfg.graph.seed_k == 10
+    assert cfg.graph.fanout == 5
+    assert cfg.graph.similar_top_n == 5
+    assert cfg.graph.similar_threshold == 0.7
+    assert cfg.graph.structural is True
+
+
+def test_graph_config_dict_roundtrip() -> None:
+    """A [graph] section in a config dict should survive _dict_to_config."""
+    cfg = _dict_to_config({"graph": {"enabled": False, "weight": 0.8}})
+    assert cfg.graph.enabled is False
+    assert cfg.graph.weight == 0.8
+    # Remaining fields fall back to GraphConfig defaults
+    assert cfg.graph.seed_k == 10
+    assert cfg.graph.fanout == 5
+    assert cfg.graph.similar_top_n == 5
+    assert cfg.graph.similar_threshold == 0.7
+    assert cfg.graph.structural is True
+    assert cfg.graph.edges_uri == "~/.memsearch/edges.db"
+
+
+def test_graph_config_set_config_value_coercion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """set_config_value should coerce graph fields: float, int, bool."""
+    cfg_path = tmp_path / "config.toml"
+    monkeypatch.setattr("memsearch.config.GLOBAL_CONFIG_PATH", cfg_path)
+    monkeypatch.setattr("memsearch.config.PROJECT_CONFIG_PATH", tmp_path / "nope.toml")
+
+    set_config_value("graph.weight", "0.8")
+    set_config_value("graph.seed_k", "7")
+    set_config_value("graph.structural", "false")
+    set_config_value("graph.enabled", "true")
+
+    data = load_config_file(cfg_path)
+    assert data["graph"]["weight"] == 0.8
+    assert isinstance(data["graph"]["weight"], float)
+    assert data["graph"]["seed_k"] == 7
+    assert isinstance(data["graph"]["seed_k"], int)
+    assert data["graph"]["structural"] is False
+    assert data["graph"]["enabled"] is True

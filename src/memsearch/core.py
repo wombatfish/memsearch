@@ -6,19 +6,60 @@ import asyncio
 import logging
 from collections.abc import Callable
 from datetime import date
+from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .watcher import FileWatcher
 
-from .chunker import Chunk, chunk_markdown, clean_content_for_embedding, compute_chunk_id
+from .chunker import _HEADING_RE, Chunk, chunk_markdown, clean_content_for_embedding, compute_chunk_id
 from .compact import compact_chunks
+from .edges import EdgeStore
 from .embeddings import EmbeddingProvider, get_provider
 from .scanner import ScannedFile, scan_paths
 from .store import MilvusStore
 
 logger = logging.getLogger(__name__)
+
+
+def _is_section_head(content: str) -> bool:
+    """True if the chunk's first non-empty line is a markdown heading.
+
+    A split large-section's continuation chunks do NOT start with a heading
+    (the chunker only emits the heading line in the first sub-chunk), so this
+    reliably starts a new section run at each real heading and keeps a single
+    heading-section's sub-chunks together.
+    """
+    for line in content.lstrip().splitlines():
+        if line.strip():
+            return bool(_HEADING_RE.match(line))
+    return False
+
+
+def _structural_edges(
+    items: list[tuple[str, str]], model: str, *, window: int = 4
+) -> list[tuple[str, str, str, float, str]]:
+    """items = (chunk_id, content) in file order. Returns sibling + same_section edges.
+
+    - sibling: every consecutive pair (weight 1.0)
+    - same_section: windowed (+/-window) pairs within a section run (weight 0.6),
+      where a section run starts at a section-head chunk (or the first chunk).
+    """
+    edges: list[tuple[str, str, str, float, str]] = []
+    for (a_id, _a), (b_id, _b) in pairwise(items):
+        edges.append((a_id, b_id, "sibling", 1.0, model))
+    runs: list[list[str]] = []
+    for cid, content in items:
+        if not runs or _is_section_head(content):
+            runs.append([])
+        runs[-1].append(cid)
+    for run in runs:
+        for i, h in enumerate(run):
+            edges.extend(
+                (h, run[j], "same_section", 0.6, model) for j in range(i + 1, min(i + 1 + window, len(run)))
+            )
+    return edges
 
 
 class MemSearch:
@@ -60,6 +101,14 @@ class MemSearch:
         max_chunk_size: int = 1500,
         overlap_lines: int = 2,
         reranker_model: str = "",
+        graph_enabled: bool = False,
+        graph_edges_uri: str = "~/.memsearch/edges.db",
+        graph_weight: float = 0.5,
+        graph_seed_k: int = 10,
+        graph_fanout: int = 5,
+        graph_similar_top_n: int = 5,
+        graph_similar_threshold: float = 0.7,
+        graph_structural: bool = True,
     ) -> None:
         self._paths = [str(p) for p in (paths or [])]
         self._max_chunk_size = max_chunk_size
@@ -79,6 +128,15 @@ class MemSearch:
             description=description,
         )
         self._reranker_model = reranker_model
+        self._graph_enabled = graph_enabled
+        self._graph_weight = graph_weight
+        self._graph_seed_k = graph_seed_k
+        self._graph_fanout = graph_fanout
+        self._graph_similar_top_n = graph_similar_top_n
+        self._graph_similar_threshold = graph_similar_threshold
+        self._graph_structural = graph_structural
+        self._edges = EdgeStore(graph_edges_uri) if graph_enabled else None
+        self._empty_edges_warned = False
 
     # ------------------------------------------------------------------
     # Indexing
@@ -107,6 +165,8 @@ class MemSearch:
         indexed_sources = self._store.indexed_sources()
         for source in indexed_sources:
             if source not in active_sources:
+                if self._edges is not None:
+                    self._edges.delete_by_hashes(list(self._store.hashes_by_source(source)))
                 self._store.delete_by_source(source)
                 logger.info("Removed stale chunks for deleted file: %s", source)
 
@@ -142,9 +202,19 @@ class MemSearch:
         stale = old_ids - chunk_ids
         if stale:
             self._store.delete_by_hashes(list(stale))
+            if self._edges is not None:
+                self._edges.delete_by_hashes(list(stale))
 
         if not chunks:
             return 0
+
+        # Build structural edges from the FULL chunks list, before the `force`
+        # filter reduces `chunks` to the edited-onward subset.
+        if self._edges is not None and self._graph_structural and chunks:
+            items = [
+                (compute_chunk_id(c.source, c.start_line, c.end_line, c.content_hash, model), c.content) for c in chunks
+            ]
+            self._edges.add_edges(_structural_edges(items, model))
 
         if not force:
             # Only embed chunks whose ID doesn't already exist
@@ -191,7 +261,49 @@ class MemSearch:
                 }
             )
 
-        return self._store.upsert(records)
+        n = self._store.upsert(records)
+        if self._edges is not None and self._graph_similar_top_n > 0:
+            ids = [r["chunk_hash"] for r in records]
+            sim_edges: list[tuple[str, str, str, float, str]] = []
+            hits: list[list[dict[str, Any]]] = []
+            for i in range(0, len(embeddings), 1024):
+                hits.extend(self._store.dense_search(embeddings[i : i + 1024], top_k=self._graph_similar_top_n + 1))
+            for own_id, hit_list in zip(ids, hits, strict=True):
+                for h in hit_list:
+                    nbr, sim = h["chunk_hash"], max(0.0, h["score"])
+                    if nbr != own_id and sim >= self._graph_similar_threshold:
+                        sim_edges.append((own_id, nbr, "similar", sim, model))
+            self._edges.add_edges(sim_edges)
+        return n
+
+    async def rebuild_edges(self) -> int:
+        """Rebuild chunk_edges from stored chunks/embeddings. No embedding API calls."""
+        if self._edges is None:
+            return 0
+        self._edges.clear()
+        edges: list[tuple[str, str, str, float, str]] = []
+        rows = list(self._store.iter_chunks(with_embeddings=(self._graph_similar_top_n > 0)))
+        model = self._embedder.model_name
+        if self._graph_structural:
+            by_src: dict[str, list[dict]] = {}
+            for r in rows:
+                by_src.setdefault(r["source"], []).append(r)
+            for src_rows in by_src.values():
+                src_rows.sort(key=lambda r: r["start_line"])
+                items = [(r["chunk_hash"], r["content"]) for r in src_rows]
+                edges += _structural_edges(items, model)
+        if self._graph_similar_top_n > 0:
+            ids = [r["chunk_hash"] for r in rows]
+            vecs = [r["embedding"] for r in rows]
+            for i in range(0, len(vecs), 1024):
+                hits = self._store.dense_search(vecs[i : i + 1024], top_k=self._graph_similar_top_n + 1)
+                for own_id, hit_list in zip(ids[i : i + 1024], hits, strict=True):
+                    for h in hit_list:
+                        nbr, sim = h["chunk_hash"], max(0.0, h["score"])
+                        if nbr != own_id and sim >= self._graph_similar_threshold:
+                            edges.append((own_id, nbr, "similar", sim, model))
+        self._edges.add_edges(edges)
+        return len(edges)
 
     # ------------------------------------------------------------------
     # Search
@@ -231,11 +343,57 @@ class MemSearch:
         embeddings = await self._embedder.embed([query])
         fetch_k = top_k * 3 if self._reranker_model else top_k
         results = self._store.search(embeddings[0], query_text=query, top_k=fetch_k, filter_expr=filter_expr)
+        if self._graph_enabled and self._edges is not None and results:
+            if not self._empty_edges_warned and self._edges.is_empty() and self._store.count() > 0:
+                logger.warning("graph mode on but no edges — run `memsearch graph rebuild`")
+                self._empty_edges_warned = True
+            results = self._graph_expand(results, top_k=fetch_k, filter_expr=filter_expr)
         if self._reranker_model and results:
             from .reranker import rerank
 
             results = rerank(query, results, model_name=self._reranker_model, top_k=top_k)
         return results
+
+    def _graph_expand(
+        self, base: list[dict[str, Any]], *, top_k: int, filter_expr: str
+    ) -> list[dict[str, Any]]:
+        rrf_k, w_g = 60, self._graph_weight
+        base_by_hash = {r["chunk_hash"]: r for r in base}
+        base_rank = {h: i + 1 for i, h in enumerate(base_by_hash)}
+        seeds = list(base_by_hash)[: self._graph_seed_k]
+        edges = self._edges.neighbors(seeds, limit_per_node=self._graph_fanout)
+        graph_score: dict[str, float] = {}
+        for nbr, weight, seed in edges:
+            s = base_by_hash[seed]["score"] * weight
+            if s > graph_score.get(nbr, 0.0):
+                graph_score[nbr] = s
+        if not graph_score:
+            return base
+        missing = [h for h in graph_score if h not in base_by_hash]
+        records = dict(base_by_hash)
+        records.update(self._fetch_chunks(missing, filter_expr))
+        graph_ranked = sorted(graph_score, key=graph_score.get, reverse=True)
+        graph_rank = {h: i + 1 for i, h in enumerate(graph_ranked)}
+        fused = {
+            h: (1.0 / (rrf_k + base_rank[h]) if h in base_rank else 0.0)
+            + (w_g / (rrf_k + graph_rank[h]) if h in graph_rank else 0.0)
+            for h in records
+        }
+        max_fused = (1.0 + w_g) / (rrf_k + 1)
+        ordered = sorted(records.values(), key=lambda r: fused[r["chunk_hash"]], reverse=True)
+        return [{**r, "score": fused[r["chunk_hash"]] / max_fused} for r in ordered[:top_k]]
+
+    def _fetch_chunks(self, hashes: list[str], filter_expr: str) -> dict[str, dict[str, Any]]:
+        from .store import _escape_filter_value
+
+        if not hashes:
+            return {}
+        in_list = ", ".join(f'"{_escape_filter_value(h)}"' for h in hashes)
+        expr = f"chunk_hash in [{in_list}]"
+        if filter_expr:
+            expr = f"({expr}) and ({filter_expr})"
+        rows = self._store.query(filter_expr=expr)
+        return {r["chunk_hash"]: {**r, "score": 0.0} for r in rows}
 
     # ------------------------------------------------------------------
     # Compact (compress memories)
@@ -373,6 +531,8 @@ class MemSearch:
         def _on_change(event_type: str, file_path: Path) -> None:
             try:
                 if event_type == "deleted":
+                    if self._edges is not None:
+                        self._edges.delete_by_hashes(list(self._store.hashes_by_source(str(file_path))))
                     self._store.delete_by_source(str(file_path))
                     summary = f"Removed chunks for {file_path}"
                 else:
@@ -405,6 +565,8 @@ class MemSearch:
     def close(self) -> None:
         """Release resources."""
         self._store.close()
+        if self._edges is not None:
+            self._edges.close()
 
     def __enter__(self) -> MemSearch:
         return self

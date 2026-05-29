@@ -26,8 +26,9 @@ GLOBAL_CONFIG_PATH = Path("~/.memsearch/config.toml").expanduser()
 PROJECT_CONFIG_PATH = Path(".memsearch.toml")
 
 # Fields that should be parsed as int when set via CLI strings
-_INT_FIELDS = {"max_chunk_size", "overlap_lines", "debounce_ms", "batch_size", "min_interval_hours"}
-_BOOL_FIELDS = {"enabled"}
+_INT_FIELDS = {"max_chunk_size", "overlap_lines", "debounce_ms", "batch_size", "min_interval_hours", "seed_k", "fanout", "similar_top_n"}
+_BOOL_FIELDS = {"enabled", "structural"}
+_FLOAT_FIELDS = {"weight", "similar_threshold"}
 
 
 @dataclass
@@ -69,6 +70,18 @@ class WatchConfig:
 @dataclass
 class RerankerConfig:
     model: str = ""  # empty = disabled; set to model ID to enable
+
+
+@dataclass
+class GraphConfig:
+    enabled: bool = True        # graph-aware retrieval on by default; --no-graph to disable
+    edges_uri: str = "~/.memsearch/edges.db"
+    weight: float = 0.5
+    seed_k: int = 10
+    fanout: int = 5
+    similar_top_n: int = 5
+    similar_threshold: float = 0.7
+    structural: bool = True
 
 
 @dataclass
@@ -164,6 +177,7 @@ class MemSearchConfig:
     chunking: ChunkingConfig = field(default_factory=ChunkingConfig)
     watch: WatchConfig = field(default_factory=WatchConfig)
     reranker: RerankerConfig = field(default_factory=RerankerConfig)
+    graph: GraphConfig = field(default_factory=GraphConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     prompts: PromptsConfig = field(default_factory=PromptsConfig)
     plugins: PluginsConfig = field(default_factory=PluginsConfig)
@@ -177,6 +191,7 @@ _SECTION_CLASSES: dict[str, type] = {
     "chunking": ChunkingConfig,
     "watch": WatchConfig,
     "reranker": RerankerConfig,
+    "graph": GraphConfig,
     "llm": LLMConfig,
     "prompts": PromptsConfig,
     "plugins": PluginsConfig,
@@ -493,6 +508,8 @@ def set_config_value(key: str, value: Any, *, project: bool = False) -> None:
     # Auto-convert int fields
     if field_name in _INT_FIELDS and isinstance(value, str):
         value = int(value)
+    if field_name in _FLOAT_FIELDS and isinstance(value, str):
+        value = float(value)
     if field_name in _BOOL_FIELDS and isinstance(value, str):
         normalized = value.strip().lower()
         if normalized in {"1", "true", "yes", "on"}:

@@ -91,6 +91,7 @@ _PARAM_MAP = {
     "overlap_lines": "chunking.overlap_lines",
     "debounce_ms": "watch.debounce_ms",
     "reranker_model": "reranker.model",
+    "graph": "graph.enabled",
 }
 
 
@@ -123,6 +124,14 @@ def _cfg_to_memsearch_kwargs(cfg: MemSearchConfig) -> dict:
         "max_chunk_size": cfg.chunking.max_chunk_size,
         "overlap_lines": cfg.chunking.overlap_lines,
         "reranker_model": cfg.reranker.model,
+        "graph_enabled": cfg.graph.enabled,
+        "graph_edges_uri": cfg.graph.edges_uri,
+        "graph_weight": cfg.graph.weight,
+        "graph_seed_k": cfg.graph.seed_k,
+        "graph_fanout": cfg.graph.fanout,
+        "graph_similar_top_n": cfg.graph.similar_top_n,
+        "graph_similar_threshold": cfg.graph.similar_threshold,
+        "graph_structural": cfg.graph.structural,
     }
 
 
@@ -270,6 +279,7 @@ def index(
 )
 @_common_options
 @click.option("--reranker-model", default=None, help="Cross-encoder model for reranking (empty string disables).")
+@click.option("--graph/--no-graph", "graph", default=None, help="Enable graph-aware retrieval expansion (default: config; on unless disabled).")
 @click.option("--json-output", "-j", is_flag=True, help="Output as JSON.")
 def search(
     query: str,
@@ -284,6 +294,7 @@ def search(
     milvus_uri: str | None,
     milvus_token: str | None,
     reranker_model: str | None,
+    graph: bool | None,
     json_output: bool,
 ) -> None:
     """Search indexed memory for QUERY."""
@@ -300,6 +311,7 @@ def search(
             milvus_uri=milvus_uri,
             milvus_token=milvus_token,
             reranker_model=reranker_model,
+            graph=graph,
         )
     )
     ms = None
@@ -797,6 +809,51 @@ def reset(
     finally:
         if store is not None:
             store.close()
+
+
+# ======================================================================
+# Graph command group
+# ======================================================================
+
+
+@cli.group("graph")
+def graph_group() -> None:
+    """Manage the chunk-relationship graph (edges sidecar)."""
+
+
+@graph_group.command("rebuild")
+@_common_options
+def graph_rebuild(
+    provider: str | None,
+    model: str | None,
+    batch_size: int | None,
+    base_url: str | None,
+    api_key: str | None,
+    collection: str | None,
+    milvus_uri: str | None,
+    milvus_token: str | None,
+) -> None:
+    """Rebuild all chunk edges from stored data (no re-embedding)."""
+    from .core import MemSearch
+
+    cfg = _safe_resolve_config(
+        _build_cli_overrides(
+            provider=provider, model=model, batch_size=batch_size,
+            base_url=base_url, api_key=api_key, collection=collection,
+            milvus_uri=milvus_uri, milvus_token=milvus_token,
+        )
+    )
+    ms = None
+    try:
+        ms = MemSearch(**_cfg_to_memsearch_kwargs(cfg))
+        count = _run(ms.rebuild_edges())
+        click.echo(f"Rebuilt {count} edges.")
+    except MilvusException as e:
+        click.echo(f"Milvus error (code {e.code}): {e.message}", err=True)
+        raise SystemExit(1) from None
+    finally:
+        if ms is not None:
+            ms.close()
 
 
 # ======================================================================
