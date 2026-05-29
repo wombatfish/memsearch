@@ -46,8 +46,8 @@ If you use multiple AI coding agents (e.g., OpenCode for some projects, Claude C
 
 ## Platform Notes
 
-!!! warning "Native Windows is not supported yet"
-    The current OpenCode plugin depends on external `bash` and `python3` helper scripts. For Windows, run it inside [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) or another POSIX-compatible shell environment. See [issue #387](https://github.com/zilliztech/memsearch/issues/387).
+!!! warning "Windows source installs"
+    For source installs on Windows, run `plugins\opencode\install.cmd` from PowerShell or cmd. The launcher uses Git Bash explicitly so plain `bash` does not resolve to WSL.
 
 ## Pages
 

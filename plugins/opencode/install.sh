@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Install the memsearch OpenCode plugin.
 #
 # This script:
@@ -15,6 +15,58 @@ AGENTS_SKILLS_DIR="${HOME}/.agents/skills"
 
 echo "=== memsearch OpenCode Plugin Installer ==="
 echo ""
+
+if grep -qiE "(microsoft|wsl)" /proc/version 2>/dev/null; then
+  cat <<'EOF'
+[ERROR] This installer is running under WSL bash.
+        For Windows source installs, run the Git Bash launcher instead:
+          plugins\opencode\install.cmd
+
+        Plain "bash" often resolves to WSL on Windows, which installs into the
+        WSL home/config instead of the Windows OpenCode environment.
+EOF
+  exit 1
+fi
+
+is_windows_git_bash() {
+  command -v cygpath >/dev/null 2>&1 && [[ "$(uname -s 2>/dev/null)" =~ ^(MINGW|MSYS|CYGWIN) ]]
+}
+
+create_dir_symlink() {
+  local src="$1"
+  local link="$2"
+
+  if [ -L "${link}" ]; then
+    rm -f "${link}"
+  elif [ -e "${link}" ]; then
+    echo "[INFO] Replacing existing directory with symlink: ${link}"
+    rm -rf "${link}"
+  fi
+
+  if is_windows_git_bash; then
+    if ! MSYS=winsymlinks:nativestrict ln -s "${src}" "${link}"; then
+      local src_win
+      local link_win
+      src_win="$(cygpath -w "${src}")"
+      link_win="$(cygpath -w "${link}")"
+      cat <<EOF
+[ERROR] Windows refused to create a directory symlink:
+        ${link_win} -> ${src_win}
+
+        Enable Windows Developer Mode or run this installer from an elevated
+        terminal, then rerun plugins\\opencode\\install.cmd.
+EOF
+      exit 1
+    fi
+
+    if [ ! -L "${link}" ]; then
+      echo "[ERROR] Symlink creation reported success but ${link} is not a symlink."
+      exit 1
+    fi
+  else
+    ln -sfn "${src}" "${link}"
+  fi
+}
 
 # 1. Check memsearch
 if command -v memsearch &>/dev/null; then
@@ -57,13 +109,8 @@ declare -A SKILL_SOURCES=(
 for skill_name in "${!SKILL_SOURCES[@]}"; do
   SKILL_LINK="${AGENTS_SKILLS_DIR}/${skill_name}"
   SKILL_SRC="${SKILL_SOURCES[$skill_name]}"
-  if [ -L "${SKILL_LINK}" ] || [ -d "${SKILL_LINK}" ]; then
-    echo "[SKIP] Skill already exists at ${SKILL_LINK}"
-    echo "       Remove it first if you want to reinstall: rm -rf ${SKILL_LINK}"
-  else
-    ln -sf "${SKILL_SRC}" "${SKILL_LINK}"
-    echo "[OK] Skill symlinked: ${SKILL_LINK} -> ${SKILL_SRC}"
-  fi
+  create_dir_symlink "${SKILL_SRC}" "${SKILL_LINK}"
+  echo "[OK] Skill symlinked: ${SKILL_LINK} -> ${SKILL_SRC}"
 done
 echo ""
 

@@ -5,15 +5,17 @@
 - OpenCode with plugin support
 - Python 3.10+
 - memsearch installed: `uv tool install "memsearch[onnx]"`
-- POSIX shell environment for the plugin helper scripts (`bash` + `python3`)
+- Python available as `python3`
+- Git Bash for Windows source installs
 
-!!! warning "Native Windows is not supported yet"
-    The OpenCode plugin currently shells out to `bash` and `python3` helper scripts for collection derivation, transcript parsing, and the background capture daemon. On a plain Windows install without a POSIX shell, the plugin may fail with errors like `derive-collection.sh: No such file or directory`.
+!!! warning "Windows source installs must use Git Bash"
+    On Windows, run `plugins\opencode\install.cmd` from PowerShell or cmd. The launcher uses Git Bash explicitly so plain `bash` does not resolve to WSL.
 
     Recommended options:
 
-    - Run OpenCode + memsearch inside [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install)
-    - Or use Git Bash / another POSIX-compatible shell and expect some path-handling rough edges
+    - Use the npm install path for normal use.
+    - Use `plugins\opencode\install.cmd` for source installs on Windows.
+    - Run OpenCode + memsearch entirely inside [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) only if your OpenCode config also lives inside WSL.
 
     If you need native Windows support, track [issue #387](https://github.com/zilliztech/memsearch/issues/387).
 
@@ -58,6 +60,12 @@ Add to your `~/.config/opencode/opencode.json`:
 bash memsearch/plugins/opencode/install.sh
 ```
 
+On Windows, run this from PowerShell or cmd instead:
+
+```bat
+memsearch\plugins\opencode\install.cmd
+```
+
 The installer:
 
 1. Symlinks the plugin to `~/.config/opencode/plugins/memsearch.ts`
@@ -92,6 +100,13 @@ For source installs, pull the latest repo and re-run the installer:
 cd memsearch
 git pull
 bash plugins/opencode/install.sh
+```
+
+On Windows:
+
+```bat
+cd memsearch
+plugins\opencode\install.cmd
 ```
 
 ## Uninstall

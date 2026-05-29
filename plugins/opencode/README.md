@@ -30,7 +30,7 @@ uv tool install 'memsearch[onnx]'
 }
 ```
 
-> Windows note: the current plugin shells out to `bash` and `python3` helper scripts. Plain Windows installs are not supported yet; use WSL2 (recommended) or a POSIX-compatible shell such as Git Bash. See issue #387.
+> Windows note: for source installs, prefer `plugins\opencode\install.cmd`. It launches Git Bash explicitly so plain `bash` does not resolve to WSL.
 
 ### Install from Source (development)
 
@@ -41,6 +41,12 @@ cd memsearch
 
 # Run the installer
 bash plugins/opencode/install.sh
+```
+
+On Windows, run this from PowerShell or cmd instead:
+
+```bat
+plugins\opencode\install.cmd
 ```
 
 ### Manual Install
