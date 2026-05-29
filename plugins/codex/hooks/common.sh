@@ -156,38 +156,20 @@ run_maintenance() {
   fi
 }
 
-# --- Index process cleanup ---
-
-INDEX_PIDFILE="$MEMSEARCH_DIR/.index.pid"
-
-# Kill any previously spawned background index processes for this project.
-# Also sweeps orphaned milvus_lite processes.
-kill_orphaned_index() {
-  # Skip in child codex exec processes to avoid killing the parent's work
+# --- Orphaned milvus_lite cleanup (Lite mode only) ---
+#
+# kill_orphaned_index() is RETIRED (mirrors plugins/claude-code): reaping
+# orphaned `memsearch index` processes is now handled cross-platform by the
+# index-domain single-writer lock (src/memsearch/watchlock.py) + `index
+# --replace`, retiring the PID-file kill and the Windows-broken
+# `pgrep -f "memsearch index"` sweep. Only the milvus_lite GC remains — the
+# lock can't cover it (milvus_lite children outlive a force-killed Lite index
+# and hold the .db file lock). Lite is POSIX-only; a no-op under Milvus server.
+kill_orphaned_milvus_lite() {
   if [ "${MEMSEARCH_NO_WATCH:-}" = "1" ]; then
     return 0
   fi
-
-  # 1. Kill PID recorded from previous background index launch
-  if [ -f "$INDEX_PIDFILE" ]; then
-    local pid
-    pid=$(cat "$INDEX_PIDFILE" 2>/dev/null || true)
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-      kill "$pid" 2>/dev/null || true
-    fi
-    rm -f "$INDEX_PIDFILE"
-  fi
-
-  # 2. Sweep any orphaned memsearch index processes for this MEMORY_DIR
   local orphans
-  orphans=$(pgrep -f "memsearch index $MEMORY_DIR" 2>/dev/null || true)
-  if [ -n "$orphans" ]; then
-    echo "$orphans" | while read -r opid; do
-      kill "$opid" 2>/dev/null || true
-    done
-  fi
-
-  # 3. Kill orphaned milvus_lite processes (they don't exit when memsearch index exits)
   orphans=$(pgrep -f "milvus_lite/lib/milvus" 2>/dev/null || true)
   if [ -n "$orphans" ]; then
     echo "$orphans" | while read -r opid; do
@@ -251,17 +233,20 @@ start_watch() {
     return 0
   fi
 
+  # --replace: take over a live incumbent watcher on this collection
+  # cross-platform (the bash stop_watch sweep no-ops on Windows). See
+  # plugins/claude-code/hooks/common.sh for the rationale.
   if [ -n "$COLLECTION_NAME" ]; then
     if command -v setsid &>/dev/null; then
-      setsid "${MEMSEARCH_CMD[@]}" watch "$MEMORY_DIR" --collection "$COLLECTION_NAME" ${COLLECTION_DESC:+--description "$COLLECTION_DESC"} </dev/null &>/dev/null &
+      setsid "${MEMSEARCH_CMD[@]}" watch "$MEMORY_DIR" --collection "$COLLECTION_NAME" --replace ${COLLECTION_DESC:+--description "$COLLECTION_DESC"} </dev/null &>/dev/null &
     else
-      nohup "${MEMSEARCH_CMD[@]}" watch "$MEMORY_DIR" --collection "$COLLECTION_NAME" ${COLLECTION_DESC:+--description "$COLLECTION_DESC"} </dev/null &>/dev/null &
+      nohup "${MEMSEARCH_CMD[@]}" watch "$MEMORY_DIR" --collection "$COLLECTION_NAME" --replace ${COLLECTION_DESC:+--description "$COLLECTION_DESC"} </dev/null &>/dev/null &
     fi
   else
     if command -v setsid &>/dev/null; then
-      setsid "${MEMSEARCH_CMD[@]}" watch "$MEMORY_DIR" ${COLLECTION_DESC:+--description "$COLLECTION_DESC"} </dev/null &>/dev/null &
+      setsid "${MEMSEARCH_CMD[@]}" watch "$MEMORY_DIR" --replace ${COLLECTION_DESC:+--description "$COLLECTION_DESC"} </dev/null &>/dev/null &
     else
-      nohup "${MEMSEARCH_CMD[@]}" watch "$MEMORY_DIR" ${COLLECTION_DESC:+--description "$COLLECTION_DESC"} </dev/null &>/dev/null &
+      nohup "${MEMSEARCH_CMD[@]}" watch "$MEMORY_DIR" --replace ${COLLECTION_DESC:+--description "$COLLECTION_DESC"} </dev/null &>/dev/null &
     fi
   fi
   echo $! > "$WATCH_PIDFILE"
@@ -277,13 +262,6 @@ cleanup_orphaned_processes() {
     pid=$(cat "$WATCH_PIDFILE" 2>/dev/null || true)
     if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
       rm -f "$WATCH_PIDFILE"
-    fi
-  fi
-  if [ -f "$INDEX_PIDFILE" ]; then
-    local pid
-    pid=$(cat "$INDEX_PIDFILE" 2>/dev/null || true)
-    if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
-      rm -f "$INDEX_PIDFILE"
     fi
   fi
 }

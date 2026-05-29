@@ -12,6 +12,8 @@ from pathlib import Path
 
 import click
 
+from .watchlock import WatchLock
+
 
 def _derive_collection_name(path: str) -> str:
     """Compute Milvus collection name from a project directory path.
@@ -225,6 +227,12 @@ def collection_name(path: str | None) -> None:
     "--max-chunk-size", default=None, type=click.IntRange(min=1), help="Max chunk size in characters (must be >= 1)."
 )
 @click.option("--description", default=None, help="Collection description (written on creation only).")
+@click.option(
+    "--replace/--no-replace",
+    default=False,
+    help="If another index already holds this collection, terminate it and take over "
+    "(self-clears a stuck/hung index — cross-platform). Default: refuse and exit.",
+)
 def index(
     paths: tuple[str, ...],
     provider: str | None,
@@ -238,6 +246,7 @@ def index(
     force: bool,
     max_chunk_size: int | None,
     description: str | None,
+    replace: bool,
 ) -> None:
     """Index markdown files from PATHS."""
     from .core import MemSearch
@@ -255,6 +264,28 @@ def index(
             max_chunk_size=max_chunk_size,
         )
     )
+
+    # Single-writer guard for the `index` domain: concurrent `index` runs on one
+    # collection thrash it with delete-stale + re-upsert churn (this is what let
+    # 6 orphaned indexers pile up). Refuse if another `index` already holds it.
+    # The `index` domain is separate from `watch`, so this does NOT block while a
+    # watcher is live. A lock-infra failure degrades to indexing without the
+    # guard rather than silently skipping.
+    lock: WatchLock | None = WatchLock(cfg.milvus.collection, domain="index")
+    try:
+        acquired = lock.acquire(replace=replace)
+    except OSError as exc:
+        click.echo(f"warning: could not establish index lock ({exc}); indexing without the single-writer guard.", err=True)
+        lock = None
+        acquired = True
+    if not acquired:
+        click.echo(
+            f"Another 'memsearch index' is already running for collection '{cfg.milvus.collection}'; "
+            f"skipping to avoid duplicate-chunk churn.",
+            err=True,
+        )
+        return
+
     ms = None
     try:
         ms = MemSearch(list(paths), **_cfg_to_memsearch_kwargs(cfg), description=description or "")
@@ -266,6 +297,8 @@ def index(
     finally:
         if ms is not None:
             ms.close()
+        if lock is not None:
+            lock.release()
 
 
 @cli.command()
@@ -530,6 +563,12 @@ def _extract_section(
     "--max-chunk-size", default=None, type=click.IntRange(min=1), help="Max chunk size in characters (must be >= 1)."
 )
 @click.option("--description", default=None, help="Collection description (written on creation only).")
+@click.option(
+    "--replace/--no-replace",
+    default=False,
+    help="If another watcher already holds this collection, terminate it and take over "
+    "(used by session hooks to reap stale watchers cross-platform). Default: refuse and exit.",
+)
 def watch(
     paths: tuple[str, ...],
     provider: str | None,
@@ -543,6 +582,7 @@ def watch(
     debounce_ms: int | None,
     max_chunk_size: int | None,
     description: str | None,
+    replace: bool,
 ) -> None:
     """Watch PATHS for markdown changes and auto-index."""
     from .core import MemSearch
@@ -561,6 +601,33 @@ def watch(
             max_chunk_size=max_chunk_size,
         )
     )
+
+    # Single-writer guard for the `watch` domain: two watchers on one collection
+    # produce duplicate chunks. Acquire before opening Milvus / loading the
+    # embedder so a refusal is cheap. The OS lock auto-releases if this process
+    # dies. Separate from the `index` domain, so a manual index is not blocked.
+    lock: WatchLock | None = WatchLock(cfg.milvus.collection, domain="watch")
+    try:
+        acquired = lock.acquire(replace=replace)
+    except OSError as exc:
+        # A lock-infrastructure failure (bad perms, odd HOME, full disk) must
+        # never silently stop watching — that is the very failure class this
+        # guard exists to prevent. Degrade to running without the guard.
+        click.echo(
+            f"warning: could not establish watch lock ({exc}); "
+            f"starting watcher without the single-writer guard.",
+            err=True,
+        )
+        lock = None
+        acquired = True
+    if not acquired:
+        click.echo(
+            f"Another memsearch watch already holds collection '{cfg.milvus.collection}'; "
+            f"not starting a second watcher. Use --replace to take over.",
+            err=True,
+        )
+        return
+
     ms = None
     watcher = None
     try:
@@ -590,6 +657,8 @@ def watch(
             watcher.stop()
         if ms is not None:
             ms.close()
+        if lock is not None:
+            lock.release()
 
 
 @cli.command()

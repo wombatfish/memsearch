@@ -177,10 +177,13 @@ fi
 [ "$acquired" = 1 ] && rmdir "$LOCKDIR" 2>/dev/null
 trap - EXIT
 
-# Kill any previous background index before re-indexing to avoid process accumulation
-kill_orphaned_index
+# Clear any stale milvus_lite (Lite mode); the index-domain lock + --replace
+# below now handle index-process serialization/takeover cross-platform.
+kill_orphaned_milvus_lite
 
-# Index immediately — don't rely on watch (which may be killed by SessionEnd before debounce fires)
-run_memsearch index "$MEMORY_DIR"
+# Index immediately — don't rely on watch (which may be killed by SessionEnd before
+# debounce fires). --replace takes over a hung prior indexer so per-turn capture
+# can't be blocked indefinitely (server mode has no SessionStart re-index to recover it).
+run_memsearch index "$MEMORY_DIR" --replace
 
 echo '{}'

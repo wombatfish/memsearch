@@ -183,8 +183,8 @@ ${CONTENT}"
   local _uri
   _uri="${MILVUS_URI:-$(_memsearch config get milvus.uri 2>/dev/null || echo "")}"
   if [[ "$_uri" == http* ]] || [[ "$_uri" == tcp* ]]; then
-    kill_orphaned_index
-    run_memsearch index "$MEMORY_DIR" >/dev/null
+    kill_orphaned_milvus_lite
+    run_memsearch index "$MEMORY_DIR" --replace >/dev/null
   fi
 
   run_maintenance

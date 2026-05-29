@@ -171,44 +171,26 @@ run_maintenance() {
   fi
 }
 
-# --- Index process cleanup ---
-
-INDEX_PIDFILE="$MEMSEARCH_DIR/.index.pid"
-
-# Kill any previously spawned background index processes for this project.
-# Also sweeps orphaned milvus_lite processes, which outlive `memsearch index`
-# in Lite mode because milvus_lite does not exit when its parent process ends.
+# --- Orphaned milvus_lite cleanup (Lite mode only) ---
 #
-# Without this cleanup, rapid session open/close cycles (e.g. when Claude Code
-# freezes on startup and the user force-quits) accumulate dozens of orphaned
-# python/milvus processes that can consume tens of GB of virtual memory and
-# cause subsequent sessions to freeze due to resource exhaustion.
-kill_orphaned_index() {
-  # Skip in child claude -p processes to avoid killing the current parent's work
+# kill_orphaned_index() is RETIRED: reaping orphaned `memsearch index`
+# processes is now handled cross-platform by the index-domain single-writer
+# lock (src/memsearch/watchlock.py) plus `index --replace`. That retires the
+# old PID-file kill and the `pgrep -f "memsearch index"` sweep — the latter
+# silently no-opped on Windows anyway.
+#
+# Only the milvus_lite GC remains, because the lock does NOT cover it:
+# milvus_lite child processes outlive `memsearch index` when it is force-killed
+# (e.g. Claude Code freezes on startup and the user force-quits). They keep
+# holding the .db file lock — blocking subsequent index runs — and leak memory.
+# Lite is POSIX-only; Milvus server mode / Windows has no milvus_lite, so this
+# is a harmless no-op there.
+kill_orphaned_milvus_lite() {
+  # Skip in child claude -p processes to avoid disrupting the parent's work
   if [ "${MEMSEARCH_NO_WATCH:-}" = "1" ]; then
     return 0
   fi
-
-  # 1. Kill PID recorded from previous background index launch
-  if [ -f "$INDEX_PIDFILE" ]; then
-    local pid
-    pid=$(cat "$INDEX_PIDFILE" 2>/dev/null || true)
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-      kill "$pid" 2>/dev/null || true
-    fi
-    rm -f "$INDEX_PIDFILE"
-  fi
-
-  # 2. Sweep any orphaned memsearch index processes for this MEMORY_DIR
   local orphans
-  orphans=$(pgrep -f "memsearch index $MEMORY_DIR" 2>/dev/null || true)
-  if [ -n "$orphans" ]; then
-    echo "$orphans" | while read -r opid; do
-      kill "$opid" 2>/dev/null || true
-    done
-  fi
-
-  # 3. Kill orphaned milvus_lite processes (they don't exit when memsearch index exits)
   orphans=$(pgrep -f "milvus_lite/lib/milvus" 2>/dev/null || true)
   if [ -n "$orphans" ]; then
     echo "$orphans" | while read -r opid; do
@@ -281,10 +263,14 @@ start_watch() {
   local launch_prefix="nohup"
   command -v setsid &>/dev/null && launch_prefix="setsid"
 
+  # --replace: the new watcher terminates any live incumbent on the same
+  # collection and takes over (cross-platform reap, in Python). The bash
+  # stop_watch sweep above is POSIX-only and a silent no-op on Windows, where
+  # pgrep is absent and the $! pidfile holds an MSYS PID, not memsearch.exe's.
   if [ -n "$COLLECTION_NAME" ]; then
-    $launch_prefix $MEMSEARCH_CMD watch "$MEMORY_DIR" --collection "$COLLECTION_NAME" ${COLLECTION_DESC:+--description "$COLLECTION_DESC"} </dev/null &>/dev/null &
+    $launch_prefix $MEMSEARCH_CMD watch "$MEMORY_DIR" --collection "$COLLECTION_NAME" --replace ${COLLECTION_DESC:+--description "$COLLECTION_DESC"} </dev/null &>/dev/null &
   else
-    $launch_prefix $MEMSEARCH_CMD watch "$MEMORY_DIR" ${COLLECTION_DESC:+--description "$COLLECTION_DESC"} </dev/null &>/dev/null &
+    $launch_prefix $MEMSEARCH_CMD watch "$MEMORY_DIR" --replace ${COLLECTION_DESC:+--description "$COLLECTION_DESC"} </dev/null &>/dev/null &
   fi
   echo $! > "$WATCH_PIDFILE"
 }

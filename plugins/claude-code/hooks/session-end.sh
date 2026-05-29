@@ -7,6 +7,6 @@ source "$SCRIPT_DIR/common.sh"
 ( run_maintenance ) </dev/null &>/dev/null &
 
 stop_watch
-kill_orphaned_index
+kill_orphaned_milvus_lite
 
 exit 0
