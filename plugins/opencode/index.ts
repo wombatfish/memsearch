@@ -188,14 +188,14 @@ function resolveMemorySetup(projectDir: string): MemorySetup {
 
 /**
  * Summarize the N most recent daily .md files for cold-start context.
- * Extracts headings (## Session, ### turns) and bullet content from each
- * file so the agent sees the structure of past days (what sessions existed,
- * what topics came up), not just the tail of whichever file is newest.
+ * Extracts headings (## Session, ### turns) and bullet content, then keeps the
+ * MOST RECENT lines per file (tail) so a busy day surfaces the latest turns, not
+ * the morning's — `slice(0, n)` froze the injection on the oldest entries.
  */
 function getRecentMemories(
   memDir: string,
   count = 2,
-  maxLinesPerFile = 30
+  maxLinesPerFile = 300
 ): string {
   if (!existsSync(memDir)) return "";
 
@@ -212,7 +212,7 @@ function getRecentMemories(
       const content = readFileSync(join(memDir, file), "utf-8");
       const lines = content.split("\n")
         .filter((l) => /^#{2,4}\s/.test(l) || l.startsWith("- ") || l.startsWith("[Human]") || l.startsWith("[Assistant]"))
-        .slice(0, maxLinesPerFile);
+        .slice(-maxLinesPerFile);
       if (lines.length > 0) {
         summary.push(`[${file}]`, ...lines);
       }

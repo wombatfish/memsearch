@@ -59,7 +59,14 @@ run_worker() {
 
   local work_input
   work_input=$(cat "$work_file" 2>/dev/null || echo "")
-  rm -f "$work_file"
+  # Crash-safety (Issue 2): keep the work-file as a sidecar and delete it only on
+  # a CLEAN exit (trap). It caches the raw turn; if this detached worker is killed
+  # mid-summarize (machine shutdown / SIGTERM / SIGKILL) the EXIT trap never runs,
+  # so the file survives for SessionStart recovery instead of the turn being lost.
+  # setsid already shields the worker from parent exit; this closes the residual
+  # kill window. (Global, not local, so the trap can see it at script-exit time.)
+  _WORKER_WORK_FILE="$work_file"
+  trap 'rm -f "$_WORKER_WORK_FILE" 2>/dev/null || true' EXIT
   if [ -z "$work_input" ]; then
     exit 0
   fi
@@ -172,6 +179,14 @@ ${CONTENT}"
   fi
 
   {
+    # Lazy session heading (Issue 1): write "## Session" once per session, only
+    # when a real summary follows — replaces the eager SessionStart write that
+    # left orphan empty headings for sessions that never summarized.
+    if [ -z "$SESSION_ID" ] || ! grep -qF "session:${SESSION_ID}" "$MEMORY_FILE" 2>/dev/null; then
+      echo ""
+      echo "## Session $NOW"
+      echo ""
+    fi
     echo "### $NOW"
     if [ -n "$SESSION_ID" ]; then
       echo "<!-- session:${SESSION_ID} rollout:${TRANSCRIPT_PATH} -->"

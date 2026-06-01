@@ -100,14 +100,43 @@ COLLECTION_DESC="${PROJECT_BASENAME} | ${PROVIDER}/${MODEL:-default}"
 EXISTING_MEMORY_FILES=$(find "$MEMORY_BUCKET_DIR" -maxdepth 1 -type f -name '*.md' 2>/dev/null | sort || true)
 EXISTING_MEMORY_COUNT=$(printf '%s\n' "$EXISTING_MEMORY_FILES" | sed '/^$/d' | wc -l | tr -d ' ')
 
-# Write session heading to today's memory file
+# Ensure the bucket dir exists. The "## Session" heading is no longer written
+# eagerly — the Stop worker writes it lazily next to the first real summary, so
+# sessions that never summarize leave no orphan empty "## Session" headings.
 ensure_memory_dir
-TODAY=$(date +%Y-%m-%d)
-NOW=$(date +%H:%M)
-MEMORY_FILE="$MEMORY_BUCKET_DIR/$TODAY.md"
-if [ ! -f "$MEMORY_FILE" ] || ! grep -qF "## Session $NOW" "$MEMORY_FILE"; then
-  echo -e "\n## Session $NOW\n" >> "$MEMORY_FILE"
-fi
+
+# --- Crash-safety recovery for the Stop worker (Issue 2) ---
+# stop.sh caches each turn to a work-file and (now) deletes it only after the
+# summary is durably written. A work-file older than the 30s summarizer timeout
+# belongs to a worker killed mid-summarize — re-home its raw turn so it isn't
+# lost. The JSON carries the exact target memory_file, so re-homing stays correct
+# even across projects; the >2-min floor never grabs a still-live worker's file.
+while IFS= read -r _wf; do
+  [ -z "$_wf" ] && continue
+  [ -f "$_wf" ] || continue
+  _wi=$(cat "$_wf" 2>/dev/null || echo "")
+  if [ -n "$_wi" ]; then
+    _mf=$(_json_val "$_wi" "memory_file" "")
+    _ct=$(_json_val "$_wi" "content" "")
+    _wnow=$(_json_val "$_wi" "now" "")
+    _wsid=$(_json_val "$_wi" "session_id" "")
+    _wtp=$(_json_val "$_wi" "transcript_path" "")
+    if [ -n "$_mf" ] && [ -n "$_ct" ]; then
+      {
+        echo ""
+        echo "## Session $(date +%H:%M) (recovered)"
+        echo ""
+        echo "### ${_wnow:-$(date +%H:%M)}"
+        if [ -n "$_wsid" ]; then echo "<!-- session:${_wsid} rollout:${_wtp} -->"; fi
+        echo "$_ct"
+        echo ""
+      } >> "$_mf"
+    fi
+  fi
+  rm -f "$_wf" 2>/dev/null || true
+done <<RECOVER_EOF
+$(find "${TMPDIR:-/tmp}" -maxdepth 1 -type f -name 'memsearch-stop.*.json' -mmin +2 2>/dev/null || true)
+RECOVER_EOF
 
 # If API key is missing, show status and exit early (watch/search would fail)
 if [ "$KEY_MISSING" = true ]; then

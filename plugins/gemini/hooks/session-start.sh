@@ -71,8 +71,9 @@ if [ -z "$recent_files" ]; then
 fi
 
 # --- Build the injected context. Extract headings + bullets (high signal
-#     density) rather than a raw tail, so the model sees the structure of recent
-#     sessions. Clearly frame it as background, not part of the user request. ---
+#     density, skipping anchors/blank lines), then keep the MOST RECENT via
+#     tail — a headless `-p` critic gets ONE turn, so it must see the latest
+#     sessions, not the oldest. Framed as background, not the user request. ---
 context="# Recent memory for ${scope}
 (Background context from prior sessions on this git branch, surfaced automatically by memsearch. Use it to ground your work; it is NOT part of the user's request. For deeper recall, use the memory-recall skill.)
 
@@ -80,7 +81,7 @@ context="# Recent memory for ${scope}
 while IFS= read -r f; do
   [ -z "$f" ] && continue
   basename_f=$(basename "$f")
-  content=$(grep -E '^(#{2,4} |- )' "$f" 2>/dev/null | head -40 || true)
+  content=$(grep -E '^(#{2,4} |- )' "$f" 2>/dev/null | tail -300 || true)
   if [ -n "$content" ]; then
     context+="## ${basename_f}
 ${content}
