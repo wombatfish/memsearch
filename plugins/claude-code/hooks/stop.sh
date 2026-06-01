@@ -102,6 +102,26 @@ else
   SYSTEM_PROMPT="You are a third-person note-taker. Summarize the transcript as 2-6 bullet points. Write in third person. Output ONLY bullet points."
 fi
 
+# --- Crash-safety sidecar (persist-then-upgrade, phase 1) ---
+# This Stop hook is async and writes the polished summary only AFTER the slow,
+# killable `claude -p` below. If teardown kills the hook mid-summarize (e.g. the
+# user quits right after a turn), that turn would be lost. So first persist the
+# raw turn to a uniquely-named sidecar in a hidden dir. The happy path appends
+# the polished summary further down and deletes this sidecar, so it never reaches
+# the main file; only a killed hook leaves it for SessionStart to recover.
+# Sidecars are extension-less and live in a dotted dir, so the scanner's
+# hidden-dir + extension filters never index them as raw (scanner.py:22,41,58).
+ENTRY_ANCHOR="<!-- session:${SESSION_ID} turn:${LAST_USER_TURN_UUID} transcript:${TRANSCRIPT_PATH} -->"
+PENDING_DIR="$MEMORY_BUCKET_DIR/.pending"
+mkdir -p "$PENDING_DIR" 2>/dev/null || true
+WRITE_TOKEN="${SESSION_ID:-nosid}-$$-$(date +%s)"
+SIDECAR="$PENDING_DIR/$WRITE_TOKEN"
+{
+  echo "### $NOW"
+  echo "$ENTRY_ANCHOR"
+  echo "$PARSED"
+} > "$SIDECAR" 2>/dev/null || true
+
 # Summarize the last turn into structured bullet points.
 # Default: use claude -p with the plugin default model. A plugin-specific
 # summarize model override can replace the model without changing provider
@@ -163,13 +183,24 @@ trap '[ "$acquired" = 1 ] && rmdir "$LOCKDIR" 2>/dev/null' EXIT
 # with an unsynchronised append.
 if [ "$acquired" = 1 ]; then
   {
-    echo "### $NOW"
-    if [ -n "$SESSION_ID" ]; then
-      echo "<!-- session:${SESSION_ID} turn:${LAST_USER_TURN_UUID} transcript:${TRANSCRIPT_PATH} -->"
+    # Lazy session heading (Issue 1): write the "## Session" grouping heading
+    # once per session, and only when a real summary follows — so sessions that
+    # never summarize leave no orphan empty headings. Detected via the
+    # per-session anchor already in the file. (Eager heading was removed from
+    # session-start.sh.)
+    if [ -z "$SESSION_ID" ] || ! grep -qF "session:${SESSION_ID}" "$MEMORY_FILE" 2>/dev/null; then
+      echo ""
+      echo "## Session $NOW"
+      echo ""
     fi
+    echo "### $NOW"
+    echo "$ENTRY_ANCHOR"
     echo "$SUMMARY"
     echo ""
   } >> "$MEMORY_FILE"
+  # Polished summary is durable — drop the crash-safety sidecar (phase 2) so the
+  # SessionStart recovery won't re-append this same turn.
+  rm -f "$SIDECAR" 2>/dev/null || true
 else
   echo "[memsearch] WARNING: lock not acquired after 10s, skipping memory write for $MEMORY_FILE" >&2
 fi

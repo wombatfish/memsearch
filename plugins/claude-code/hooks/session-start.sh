@@ -109,13 +109,50 @@ fi
 PROJECT_BASENAME=$(basename "${CLAUDE_PROJECT_DIR:-.}")
 COLLECTION_DESC="${PROJECT_BASENAME} | ${PROVIDER}/${MODEL:-default}"
 
-# Write session heading to today's memory file
+# Ensure the bucket dir exists. The "## Session" heading is no longer written
+# eagerly here — the Stop hook writes it lazily next to the first real summary,
+# so sessions that never summarize leave no orphan empty "## Session" headings.
 ensure_memory_dir
-TODAY=$(date +%Y-%m-%d)
-NOW=$(date +%H:%M)
-MEMORY_FILE="$MEMORY_BUCKET_DIR/$TODAY.md"
-if [ ! -f "$MEMORY_FILE" ] || ! grep -qF "## Session $NOW" "$MEMORY_FILE"; then
-  echo -e "\n## Session $NOW\n" >> "$MEMORY_FILE"
+
+# --- Crash-safety recovery (persist-then-upgrade, recovery phase) ---
+# The Stop hook persists each turn to a hidden `.pending/<token>` sidecar before
+# the slow `claude -p`, then deletes it once the polished summary is durable. A
+# sidecar still present and older than the 120s Stop timeout therefore belongs to
+# a Stop hook that was killed mid-summarize — re-home its raw turn into today's
+# file so it isn't lost to search. The >2-min floor guarantees we never grab a
+# still-live sidecar from a concurrent session. Rare path: usually a no-op.
+_PENDING_DIR="$MEMORY_BUCKET_DIR/.pending"
+if [ -d "$_PENDING_DIR" ]; then
+  _RECOVERY_FILE="$MEMORY_BUCKET_DIR/$(date +%Y-%m-%d).md"
+  _RECOVERY_HEAD="## Session $(date +%H:%M) (recovered)"
+  while IFS= read -r _sc; do
+    [ -z "$_sc" ] && continue
+    [ -f "$_sc" ] || continue
+    # Same mkdir-mutex the Stop hook uses, so recovery and a live Stop write to
+    # today's file never interleave. 10s budget; reclaim a >60s stale lock.
+    _LOCKDIR="${_RECOVERY_FILE}.lock.d"
+    _acq=0
+    for _ in $(seq 1 100); do
+      if mkdir "$_LOCKDIR" 2>/dev/null; then _acq=1; break; fi
+      if [ -d "$_LOCKDIR" ] && [ -n "$(find "$_LOCKDIR" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+        rmdir "$_LOCKDIR" 2>/dev/null
+      fi
+      sleep 0.1
+    done
+    if [ "$_acq" = 1 ]; then
+      {
+        echo ""
+        echo "$_RECOVERY_HEAD"
+        echo ""
+        cat "$_sc"
+        echo ""
+      } >> "$_RECOVERY_FILE"
+      rm -f "$_sc" 2>/dev/null || true
+      rmdir "$_LOCKDIR" 2>/dev/null || true
+    fi
+  done <<RECOVER_EOF
+$(find "$_PENDING_DIR" -maxdepth 1 -type f -mmin +2 2>/dev/null || true)
+RECOVER_EOF
 fi
 
 # If API key is missing, show status and exit early (watch/search would fail)
@@ -171,10 +208,14 @@ if [ -n "$recent_files" ]; then
     [ -z "$f" ] && continue
     basename_f=$(basename "$f")
     # Extract headings (## Session, ### turn timestamps) and bullet content —
-    # higher signal density than a raw tail, so Claude can see the structure
-    # of past days (what sessions existed, what topics came up) rather than
-    # just the last 30 lines of whichever file happened to be newest.
-    content=$(grep -E '^(#{2,4} |- )' "$f" 2>/dev/null | head -40 || true)
+    # higher signal density than a raw tail of the file (skips HTML anchors and
+    # blank lines). tail -300 keeps the MOST RECENT turns — effectively the whole
+    # day, since summaries are compact (~1-2K tokens for a full day). The cap is
+    # only a runaway-day guard (the real scope bound is the 2-file `head -2`
+    # above), not a relevance filter; head -N would freeze the injected context
+    # on the morning's entries and hide everything newer (the bug that lost the
+    # 16:45 plan reference).
+    content=$(grep -E '^(#{2,4} |- )' "$f" 2>/dev/null | tail -300 || true)
     if [ -n "$content" ]; then
       context+="## $basename_f\n$content\n\n"
     fi
