@@ -121,6 +121,8 @@ When modifying hooks/skills, keep in mind:
 
 See `CLAUDE.local.md` for detailed release procedures, current versions, and operational details.
 
+**Match upstream versions on every upstream merge.** Whenever `upstream/main` is merged — or its content is cherry-picked/ported — into this fork, set **all** version files to **exactly** upstream's versions in the same change (`pyproject.toml`, the matching line in `uv.lock`, every `plugins/*/…/{plugin.json,package.json}`, and `marketplace.json` if upstream moved it). This is not a contradiction of the standing "no arbitrary local bumps" rule — that rule forbids bumping to a version upstream doesn't have, which is what *causes* resync conflicts. Holding the fork at the **same** version as upstream for the same content is what *avoids* them: a later full merge sees identical version lines and conflicts on nothing. So the invariant is "fork version == upstream version, always," never "fork version frozen." Verify after porting: `git show upstream/main:<file>` vs the working tree for each version field. (Note: bumping `plugin.json` also forces a fresh, un-stale plugin cache dir on the next `/plugin install` — a side benefit, per the stale-cache traps below.)
+
 ## Updating a deployed build (stale-cache traps)
 
 There are **two independent deploy layers** — updating one does NOT update the other:
