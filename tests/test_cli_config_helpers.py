@@ -81,6 +81,7 @@ def test_cfg_to_memsearch_kwargs_translates_resolved_config() -> None:
         "milvus_uri": "http://milvus.local:19530",
         "milvus_token": "milvus-token",
         "collection": "team_notes",
+        "consistency_level": "",
         "max_chunk_size": 1800,
         "overlap_lines": 4,
         "reranker_model": "",
@@ -107,6 +108,18 @@ def test_cfg_to_memsearch_kwargs_includes_graph_defaults() -> None:
     assert kwargs["graph_similar_top_n"] == 5
     assert kwargs["graph_similar_threshold"] == 0.7
     assert kwargs["graph_structural"] is True
+
+
+def test_build_cli_overrides_consistency_maps_to_milvus() -> None:
+    assert cli_module._build_cli_overrides(consistency="Strong") == {"milvus": {"consistency_level": "Strong"}}
+    # None means "not set by the user" → no milvus key
+    assert "milvus" not in cli_module._build_cli_overrides(consistency=None)
+
+
+def test_cfg_to_memsearch_kwargs_carries_consistency_level() -> None:
+    cfg = MemSearchConfig()
+    cfg.milvus.consistency_level = "Strong"
+    assert cli_module._cfg_to_memsearch_kwargs(cfg)["consistency_level"] == "Strong"
 
 
 def test_build_cli_overrides_graph_flag() -> None:

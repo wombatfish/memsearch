@@ -1,10 +1,119 @@
 """Tests for the Milvus store."""
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from memsearch.store import MilvusStore
+
+
+class _FakeClient:
+    """Records read-call kwargs without touching a real Milvus (runs on Windows)."""
+
+    def __init__(self, *, row_count: int = 5, query_result: list[dict] | None = None) -> None:
+        self._row_count = row_count
+        self._query_result = query_result if query_result is not None else [{"chunk_hash": "h1"}]
+        self.search_kwargs: dict[str, Any] | None = None
+        self.hybrid_kwargs: dict[str, Any] | None = None
+        self.query_calls: list[dict[str, Any]] = []
+
+    def get_collection_stats(self, collection_name: str) -> dict[str, int]:
+        return {"row_count": self._row_count}
+
+    def query(self, **kwargs: Any) -> list[dict]:
+        self.query_calls.append(kwargs)
+        return self._query_result
+
+    def search(self, **kwargs: Any) -> list:
+        self.search_kwargs = kwargs
+        return []
+
+    def hybrid_search(self, **kwargs: Any) -> list:
+        self.hybrid_kwargs = kwargs
+        return [[]]
+
+
+def _bare_store(*, is_lite: bool, consistency: str, client: _FakeClient | None = None) -> MilvusStore:
+    s = object.__new__(MilvusStore)
+    s._is_lite = is_lite
+    s._consistency_level = consistency
+    s._collection = "c"
+    s._client = client or _FakeClient()
+    return s
+
+
+# --- consistency_level: remote read ops carry it; Lite never does ---
+
+
+def test_consistency_kwargs_remote_strong():
+    assert _bare_store(is_lite=False, consistency="Strong")._consistency_kwargs() == {"consistency_level": "Strong"}
+
+
+def test_consistency_kwargs_lite_omits():
+    # Milvus Lite is locally strong-consistent — never send the kwarg.
+    assert _bare_store(is_lite=True, consistency="Strong")._consistency_kwargs() == {}
+
+
+def test_consistency_kwargs_remote_unset_omits():
+    assert _bare_store(is_lite=False, consistency="")._consistency_kwargs() == {}
+
+
+def test_search_passes_consistency_on_remote():
+    s = _bare_store(is_lite=False, consistency="Strong")
+    s.search([0.0, 0.0, 0.0, 0.0], query_text="x")
+    assert s._client.hybrid_kwargs["consistency_level"] == "Strong"
+
+
+def test_dense_search_passes_consistency_on_remote():
+    s = _bare_store(is_lite=False, consistency="Strong")
+    s.dense_search([[0.0, 0.0, 0.0, 0.0]])
+    assert s._client.search_kwargs["consistency_level"] == "Strong"
+
+
+def test_query_passes_consistency_on_remote():
+    s = _bare_store(is_lite=False, consistency="Strong")
+    s.query()
+    assert s._client.query_calls[0]["consistency_level"] == "Strong"
+
+
+def test_dense_search_lite_omits_consistency():
+    s = _bare_store(is_lite=True, consistency="Strong")
+    s.dense_search([[0.0, 0.0, 0.0, 0.0]])
+    assert "consistency_level" not in s._client.search_kwargs
+
+
+# --- cold-start guard: sealed-segment row_count=0 must not drop unsealed data ---
+
+
+def test_nonempty_coldstart_probes_when_strong_remote():
+    # row_count=0 (no sealed segments) but a consistency-honouring point query finds a row.
+    client = _FakeClient(row_count=0, query_result=[{"chunk_hash": "h1"}])
+    s = _bare_store(is_lite=False, consistency="Strong", client=client)
+    assert s._nonempty() is True
+    assert client.query_calls and client.query_calls[0]["consistency_level"] == "Strong"
+
+
+def test_nonempty_coldstart_probe_empty_returns_false():
+    client = _FakeClient(row_count=0, query_result=[])
+    s = _bare_store(is_lite=False, consistency="Strong", client=client)
+    assert s._nonempty() is False
+
+
+def test_nonempty_no_override_uses_stats_only():
+    # Without a consistency override, behaviour is unchanged: trust the stats count,
+    # never issue a probe (preserves the cheap path for Lite / default-consistency).
+    client = _FakeClient(row_count=0)
+    s = _bare_store(is_lite=False, consistency="", client=client)
+    assert s._nonempty() is False
+    assert client.query_calls == []
+
+
+def test_nonempty_lite_uses_stats_only():
+    client = _FakeClient(row_count=0)
+    s = _bare_store(is_lite=True, consistency="Strong", client=client)
+    assert s._nonempty() is False
+    assert client.query_calls == []
 
 
 @pytest.fixture

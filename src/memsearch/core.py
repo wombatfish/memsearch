@@ -98,6 +98,7 @@ class MemSearch:
         milvus_token: str | None = None,
         collection: str = "memsearch_chunks",
         description: str = "",
+        consistency_level: str = "",
         max_chunk_size: int = 1500,
         overlap_lines: int = 2,
         reranker_model: str = "",
@@ -126,6 +127,7 @@ class MemSearch:
             collection=collection,
             dimension=self._embedder.dimension,
             description=description,
+            consistency_level=consistency_level,
         )
         self._reranker_model = reranker_model
         self._graph_enabled = graph_enabled

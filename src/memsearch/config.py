@@ -36,6 +36,10 @@ class MilvusConfig:
     uri: str = "~/.memsearch/milvus.db"
     token: str = ""
     collection: str = "memsearch_chunks"
+    # Read-path consistency level for remote Milvus: "" = collection default (Bounded),
+    # "Strong" = no staleness so freshly-upserted chunks are immediately searchable
+    # (cross-process watcher→recall). Ignored on Milvus Lite (already strong-consistent).
+    consistency_level: str = ""
 
 
 @dataclass
