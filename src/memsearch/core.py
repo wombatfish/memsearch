@@ -136,7 +136,7 @@ class MemSearch:
         self._graph_similar_threshold = graph_similar_threshold
         self._graph_structural = graph_structural
         self._edges = EdgeStore(graph_edges_uri) if graph_enabled else None
-        self._empty_edges_warned = False
+        self._edges_checked = False
 
     # ------------------------------------------------------------------
     # Indexing
@@ -291,7 +291,6 @@ class MemSearch:
         """Rebuild chunk_edges from stored chunks/embeddings. No embedding API calls."""
         if self._edges is None:
             return 0
-        self._edges.clear()
         edges: list[tuple[str, str, str, float, str]] = []
         rows = list(self._store.iter_chunks(with_embeddings=(self._graph_similar_top_n > 0)))
         model = self._embedder.model_name
@@ -313,7 +312,11 @@ class MemSearch:
                         nbr, sim = h["chunk_hash"], max(0.0, h["score"])
                         if nbr != own_id and sim >= self._graph_similar_threshold:
                             edges.append((own_id, nbr, "similar", sim, model))
-        self._edges.add_edges(edges)
+        # Atomic, collection-scoped swap: delete only this collection's prior edges
+        # (edges.db is shared across collections — never global-truncate), never
+        # expose an empty graph mid-rebuild, and roll back on a failed swap.
+        owned = [r["chunk_hash"] for r in rows]
+        self._edges.replace_all(owned, edges)
         return len(edges)
 
     # ------------------------------------------------------------------
@@ -355,9 +358,17 @@ class MemSearch:
         fetch_k = top_k * 3 if self._reranker_model else top_k
         results = self._store.search(embeddings[0], query_text=query, top_k=fetch_k, filter_expr=filter_expr)
         if self._graph_enabled and self._edges is not None and results:
-            if not self._empty_edges_warned and self._edges.is_empty() and self._store.count() > 0:
-                logger.warning("graph mode on but no edges — run `memsearch graph rebuild`")
-                self._empty_edges_warned = True
+            # Latch after the FIRST check regardless of outcome: in the healthy
+            # (edges present) case the warning never fires, so a non-latched gate
+            # would re-run the check on every search. Scope the emptiness probe to
+            # this query's own result hashes — edges.db is shared across
+            # collections, so a global is_empty() would suppress the hint for a
+            # fresh collection co-mingled with a populated one.
+            if not self._edges_checked:
+                self._edges_checked = True
+                result_hashes = [r["chunk_hash"] for r in results]
+                if self._edges.is_empty_for(result_hashes) and self._store.count() > 0:
+                    logger.warning("graph mode on but no edges — run `memsearch graph rebuild`")
             results = self._graph_expand(results, top_k=fetch_k, filter_expr=filter_expr)
         if self._reranker_model and results:
             from .reranker import rerank

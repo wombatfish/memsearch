@@ -892,6 +892,11 @@ def graph_group() -> None:
 
 @graph_group.command("rebuild")
 @_common_options
+@click.option(
+    "--replace/--no-replace",
+    default=False,
+    help="Take over the index writer lock from another index/rebuild already holding it.",
+)
 def graph_rebuild(
     provider: str | None,
     model: str | None,
@@ -901,6 +906,7 @@ def graph_rebuild(
     collection: str | None,
     milvus_uri: str | None,
     milvus_token: str | None,
+    replace: bool,
 ) -> None:
     """Rebuild all chunk edges from stored data (no re-embedding)."""
     from .core import MemSearch
@@ -912,6 +918,28 @@ def graph_rebuild(
             milvus_uri=milvus_uri, milvus_token=milvus_token,
         )
     )
+
+    # Rebuild is a destructive full-table swap of the edges sidecar. Serialize it
+    # against `index` runs and other rebuilds via the shared `index` writer lock so
+    # they don't clobber each other's edge sets. Separate from the `watch` domain,
+    # so a live watcher is not blocked — concurrent watcher writes are reconciled by
+    # SQLite (busy_timeout) and folded in by the next rebuild. A lock-infra failure
+    # degrades to rebuilding without the guard rather than silently skipping.
+    lock: WatchLock | None = WatchLock(cfg.milvus.collection, domain="index")
+    try:
+        acquired = lock.acquire(replace=replace)
+    except OSError as exc:
+        click.echo(f"warning: could not establish index lock ({exc}); rebuilding without the single-writer guard.", err=True)
+        lock = None
+        acquired = True
+    if not acquired:
+        click.echo(
+            f"Another 'memsearch index' or 'graph rebuild' is running for collection '{cfg.milvus.collection}'; "
+            f"skipping to avoid clobbering edges. Use --replace to take over.",
+            err=True,
+        )
+        return
+
     ms = None
     try:
         ms = MemSearch(**_cfg_to_memsearch_kwargs(cfg))
@@ -923,6 +951,8 @@ def graph_rebuild(
     finally:
         if ms is not None:
             ms.close()
+        if lock is not None:
+            lock.release()
 
 
 # ======================================================================

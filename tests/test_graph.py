@@ -12,6 +12,7 @@ import logging
 from typing import Any
 
 from memsearch.core import MemSearch, _is_section_head, _structural_edges
+from memsearch.edges import EdgeStore
 
 
 def _same_section(edges: list[tuple[str, str, str, float, str]]) -> list[tuple[str, str]]:
@@ -199,11 +200,17 @@ class _FakeEmbedder:
 
 
 class _RecordingEdges:
-    """EdgeStore stub capturing clear()/add_edges() for rebuild assertions."""
+    """EdgeStore stub capturing replace_all()/clear()/add_edges() for rebuild assertions."""
 
     def __init__(self) -> None:
         self.cleared = 0
         self.added: list[tuple[str, str, str, float, str]] = []
+
+    def replace_all(self, owned: list[str], edges: list[tuple[str, str, str, float, str]]) -> None:
+        # rebuild_edges now does an atomic, collection-scoped swap; mirror it.
+        self.cleared += 1
+        self.owned = owned
+        self.added.extend(edges)
 
     def clear(self) -> None:
         self.cleared += 1
@@ -304,6 +311,9 @@ class _EmptyEdges:
     def is_empty(self) -> bool:
         return True
 
+    def is_empty_for(self, hashes: list[str]) -> bool:
+        return True
+
     def neighbors(self, seeds: list[str], *, limit_per_node: int = 5) -> list[tuple[str, float, str]]:
         return []
 
@@ -315,7 +325,7 @@ def _make_search_mem(store, edges, *, graph_enabled: bool) -> MemSearch:
     m._store = store
     m._graph_enabled = graph_enabled
     m._edges = edges
-    m._empty_edges_warned = False
+    m._edges_checked = False
     m._graph_weight = 0.5
     m._graph_seed_k = 10
     m._graph_fanout = 5
@@ -338,5 +348,72 @@ async def test_search_warns_once_when_graph_on_but_edges_empty(caplog):
         await m.search("q", top_k=10)
         second = caplog.text.count("graph rebuild")
     assert first == 1  # warned on the first empty-edges search
-    assert second == 1  # one-time: not repeated on the second search
-    assert m._empty_edges_warned is True
+    assert second == 1  # one-time: latched after the first check, not re-run
+    assert m._edges_checked is True
+
+
+# --- EdgeStore concurrency hardening (shared edges.db across sessions) ---------
+
+
+def test_edge_store_sets_concurrency_pragmas(tmp_path):
+    """WAL keeps search-time reads from blocking a writer. busy_timeout is kept
+    SHORT (not 30s) so an open never hangs the session behind the indexer."""
+    store = EdgeStore(str(tmp_path / "edges.db"))
+    try:
+        journal = store._conn.execute("PRAGMA journal_mode").fetchone()[0]
+        timeout = store._conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    finally:
+        store.close()
+    assert journal.lower() == "wal"
+    assert timeout == 3000
+
+
+def test_replace_all_swaps_owned_and_preserves_other_collections(tmp_path):
+    """replace_all must delete only edges sourced from `owned` (this collection's
+    chunks) and re-insert the new set. Edges sourced elsewhere — i.e. another
+    collection sharing the global edges.db — MUST survive (the 2026-05-29
+    global-delete regression guard)."""
+    store = EdgeStore(str(tmp_path / "edges.db"))
+    try:
+        # "a" belongs to this collection; "c" belongs to a different collection.
+        store.add_edges([("a", "b", "similar", 0.9, "m"), ("c", "d", "sibling", 1.0, "m")])
+        store.replace_all(["a"], [("a", "b", "similar", 0.5, "m")])
+        rows = store._conn.execute(
+            "SELECT src_hash, dst_hash, weight FROM chunk_edges ORDER BY src_hash"
+        ).fetchall()
+    finally:
+        store.close()
+    assert rows == [("a", "b", 0.5), ("c", "d", 1.0)]  # a-b reweighted, c-d (other collection) untouched
+
+
+def test_replace_all_rolls_back_on_failure_keeping_prior_edges(tmp_path):
+    """A failed swap (e.g. malformed row) must roll back to the prior edges, not
+    leave the graph truncated."""
+    store = EdgeStore(str(tmp_path / "edges.db"))
+    try:
+        store.add_edges([("a", "b", "similar", 0.9, "m")])
+        bad = [("a", "z", "similar", 0.5, "m"), ("too", "few")]  # 2nd tuple has wrong arity
+        try:
+            store.replace_all(["a"], bad)
+        except Exception:
+            pass
+        rows = store._conn.execute("SELECT src_hash, dst_hash FROM chunk_edges").fetchall()
+    finally:
+        store.close()
+    assert rows == [("a", "b")]  # prior edge survived the rolled-back swap
+
+
+def test_is_empty_for_scopes_to_given_hashes(tmp_path):
+    """is_empty_for must reflect ONLY the given hashes — a populated foreign
+    collection sharing the global edges.db must not mask a fresh collection's
+    emptiness (the warning-suppression bug global is_empty() has)."""
+    store = EdgeStore(str(tmp_path / "edges.db"))
+    try:
+        store.add_edges([("foreign_src", "foreign_dst", "similar", 0.9, "m")])
+        assert store.is_empty() is False  # global view: foreign edge masks emptiness
+        assert store.is_empty_for(["mine_a", "mine_b"]) is True  # scoped view: my collection is empty
+        store.add_edges([("x", "mine_a", "similar", 0.5, "m")])  # edge touches mine_a as dst
+        assert store.is_empty_for(["mine_a", "mine_b"]) is False  # matches src OR dst
+        assert store.is_empty_for([]) is True  # no hashes → vacuously empty
+    finally:
+        store.close()

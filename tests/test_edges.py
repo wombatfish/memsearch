@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import sqlite3
+import time
+
 import pytest
 
 from memsearch.edges import EdgeStore
@@ -113,3 +116,31 @@ def test_empty_inputs_no_error(store):
     store.add_edges([])  # should not raise
     assert store.neighbors([]) == []
     store.delete_by_hashes([])  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# 9. __init__ must not stall (or crash) behind a concurrent writer.
+#    Regression: schema DDL ran on every open and took a write lock, so opening
+#    the store on the search hot path hung up to busy_timeout (30s) behind the
+#    session-start indexer's write transaction.
+# ---------------------------------------------------------------------------
+
+
+def test_init_does_not_block_behind_a_writer(tmp_path):
+    db = str(tmp_path / "edges.db")
+    EdgeStore(db).close()  # create the file + schema once
+
+    # Hold an open write transaction, as the watcher/indexer does mid-write.
+    blocker = sqlite3.connect(db, timeout=60)
+    blocker.execute("PRAGMA busy_timeout=0")
+    blocker.execute("BEGIN IMMEDIATE")
+    blocker.execute("INSERT OR REPLACE INTO chunk_edges VALUES ('w', 'w', 'r', 1.0, 'm')")
+    try:
+        t0 = time.monotonic()
+        s = EdgeStore(db)  # must skip DDL (table exists) → no write lock, no stall
+        elapsed = time.monotonic() - t0
+        s.close()
+    finally:
+        blocker.rollback()
+        blocker.close()
+    assert elapsed < 1.0, f"EdgeStore.__init__ stalled {elapsed:.2f}s behind a writer (DDL took a write lock)"
