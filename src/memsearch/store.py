@@ -79,10 +79,18 @@ class MilvusStore:
         self._ensure_collection()
 
     def _consistency_kwargs(self) -> dict[str, str]:
-        """consistency_level kwarg for read ops — only on remote when explicitly set."""
-        if self._is_lite or not self._consistency_level:
+        """consistency_level kwarg for read ops — only on remote when explicitly set.
+
+        Normalised to the capitalised enum name pymilvus requires: resolution is
+        ``ConsistencyLevel.Value(name)`` (protobuf, case-sensitive), so "strong"
+        raises InvalidConsistencyLevel while "Strong" is valid. Every valid level
+        (Strong/Bounded/Session/Eventually/Customized) equals its ``.capitalize()``
+        form, so this accepts any casing from CLI/config/skill callers.
+        """
+        level = self._consistency_level.strip()
+        if self._is_lite or not level:
             return {}
-        return {"consistency_level": self._consistency_level}
+        return {"consistency_level": level.capitalize()}
 
     def _nonempty(self) -> bool:
         """Whether the collection holds any rows.

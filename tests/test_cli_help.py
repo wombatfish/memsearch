@@ -66,6 +66,6 @@ def test_search_consistency_flag_reaches_constructor(monkeypatch: pytest.MonkeyP
             pass
 
     monkeypatch.setattr("memsearch.core.MemSearch", FakeMS)
-    result = CliRunner().invoke(cli, ["search", "foo", "--consistency", "strong"])
+    result = CliRunner().invoke(cli, ["search", "foo", "--consistency", "Strong"])
     assert result.exit_code == 0, result.output
-    assert captured.get("consistency_level") == "strong"
+    assert captured.get("consistency_level") == "Strong"
