@@ -17,10 +17,10 @@ Search for memories relevant to: $ARGUMENTS
 
 ## Steps
 
-1. **Search**: Run `memsearch search "<query>" --top-k 5 --json-output --consistency strong --collection <collection name above>` to find relevant chunks.
+1. **Search**: Run `memsearch search "<query>" --top-k 5 --json-output --consistency Strong --collection <collection name above>` to find relevant chunks.
    - If `memsearch` is not found, try `uvx memsearch` instead.
    - Choose a search query that captures the core intent of the user's question.
-   - `--consistency strong` ensures memories written by the watcher earlier this session are immediately visible on remote Milvus (no-op on Milvus Lite).
+   - `--consistency Strong` ensures memories written by the watcher earlier this session are immediately visible on remote Milvus (no-op on Milvus Lite).
 
 2. **Evaluate**: Look at the search results. Skip chunks that are clearly irrelevant or too generic.
 

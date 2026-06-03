@@ -59,6 +59,20 @@ def test_consistency_kwargs_remote_unset_omits():
     assert _bare_store(is_lite=False, consistency="")._consistency_kwargs() == {}
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("strong", "Strong"), ("STRONG", "Strong"), (" Bounded ", "Bounded"), ("eventually", "Eventually")],
+)
+def test_consistency_kwargs_normalizes_case(raw: str, expected: str):
+    # pymilvus ConsistencyLevel.Value() is case-sensitive — any caller casing must
+    # resolve to the capitalised enum name or the real call raises InvalidConsistencyLevel.
+    assert _bare_store(is_lite=False, consistency=raw)._consistency_kwargs() == {"consistency_level": expected}
+
+
+def test_consistency_kwargs_whitespace_only_omits():
+    assert _bare_store(is_lite=False, consistency="   ")._consistency_kwargs() == {}
+
+
 def test_search_passes_consistency_on_remote():
     s = _bare_store(is_lite=False, consistency="Strong")
     s.search([0.0, 0.0, 0.0, 0.0], query_text="x")
