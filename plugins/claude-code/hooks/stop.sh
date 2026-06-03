@@ -78,12 +78,21 @@ SESSION_ID=$(basename "$TRANSCRIPT_PATH" .jsonl)
 LAST_USER_TURN_UUID=$(python3 -c "
 import json, sys
 uuid = ''
-with open(sys.argv[1]) as f:
+with open(sys.argv[1], encoding='utf-8', errors='replace') as f:
     for line in f:
         try:
             obj = json.loads(line)
-            if obj.get('type') == 'user' and isinstance(obj.get('message', {}).get('content'), str):
+            if obj.get('type') != 'user' or obj.get('isMeta'):
+                continue
+            content = obj.get('message', {}).get('content')
+            if isinstance(content, str) and content.strip():
                 uuid = obj.get('uuid', '')
+                continue
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get('type') == 'text' and block.get('text', '').strip():
+                        uuid = obj.get('uuid', '')
+                        break
         except: pass
 print(uuid)
 " "$TRANSCRIPT_PATH" 2>/dev/null || true)
@@ -145,12 +154,19 @@ elif command -v claude &>/dev/null; then
       SUMMARIZE_MODEL="$CONFIG_MODEL"
     fi
   fi
-  SUMMARY=$(printf '%s' "$PARSED" | MEMSEARCH_NO_WATCH=1 CLAUDECODE= claude -p \
+  # Fold the observer prompt into the primary prompt to avoid the broken
+  # --system-prompt + stdin path (#563), but keep delivery on stdin: claude is a
+  # native Windows .exe, and a long last turn passed as an argv can exceed the
+  # ~32K CreateProcess command-line limit and silently fail (windows-bash-portability).
+  LLM_PROMPT="${SYSTEM_PROMPT}
+
+Transcript:
+${PARSED}"
+  SUMMARY=$(printf '%s' "$LLM_PROMPT" | MEMSEARCH_NO_WATCH=1 CLAUDECODE= claude -p \
     --strict-mcp-config \
     --model "$SUMMARIZE_MODEL" \
     --no-session-persistence \
     --no-chrome \
-    --system-prompt "$SYSTEM_PROMPT" \
     2>/dev/null || true)
 fi
 
