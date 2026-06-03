@@ -84,6 +84,7 @@ _PARAM_MAP = {
     "collection": "milvus.collection",
     "milvus_uri": "milvus.uri",
     "milvus_token": "milvus.token",
+    "consistency": "milvus.consistency_level",
     "llm_provider": "compact.llm_provider",
     "llm_model": "compact.llm_model",
     "prompt_file": "compact.prompt_file",
@@ -123,6 +124,7 @@ def _cfg_to_memsearch_kwargs(cfg: MemSearchConfig) -> dict:
         "milvus_uri": cfg.milvus.uri,
         "milvus_token": cfg.milvus.token or None,
         "collection": cfg.milvus.collection,
+        "consistency_level": cfg.milvus.consistency_level,
         "max_chunk_size": cfg.chunking.max_chunk_size,
         "overlap_lines": cfg.chunking.overlap_lines,
         "reranker_model": cfg.reranker.model,
@@ -313,6 +315,12 @@ def index(
 @_common_options
 @click.option("--reranker-model", default=None, help="Cross-encoder model for reranking (empty string disables).")
 @click.option("--graph/--no-graph", "graph", default=None, help="Enable graph-aware retrieval expansion (default: config; on unless disabled).")
+@click.option(
+    "--consistency",
+    default=None,
+    help="Remote Milvus read consistency: Strong avoids staleness so just-indexed chunks are "
+    "immediately searchable. Ignored on Milvus Lite. Default: collection setting (Bounded).",
+)
 @click.option("--json-output", "-j", is_flag=True, help="Output as JSON.")
 def search(
     query: str,
@@ -328,6 +336,7 @@ def search(
     milvus_token: str | None,
     reranker_model: str | None,
     graph: bool | None,
+    consistency: str | None,
     json_output: bool,
 ) -> None:
     """Search indexed memory for QUERY."""
@@ -345,6 +354,7 @@ def search(
             milvus_token=milvus_token,
             reranker_model=reranker_model,
             graph=graph,
+            consistency=consistency,
         )
     )
     ms = None

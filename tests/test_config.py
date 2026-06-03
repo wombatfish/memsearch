@@ -27,6 +27,7 @@ def test_default_config():
     cfg = MemSearchConfig()
     assert cfg.milvus.uri == "~/.memsearch/milvus.db"
     assert cfg.milvus.collection == "memsearch_chunks"
+    assert cfg.milvus.consistency_level == ""  # empty = inherit collection default
     assert cfg.embedding.provider == "openai"
     assert cfg.chunking.max_chunk_size == 1500
     assert cfg.chunking.overlap_lines == 2
@@ -468,6 +469,11 @@ def test_compact_config_set_get_roundtrip(tmp_path: Path, monkeypatch: pytest.Mo
     cfg = resolve_config()
     assert get_config_value("compact.base_url", cfg) == "https://custom-llm.example.com"
     assert get_config_value("compact.api_key", cfg) == "sk-custom-123"
+
+
+def test_milvus_consistency_level_roundtrips() -> None:
+    cfg = _dict_to_config({"milvus": {"consistency_level": "Strong"}})
+    assert cfg.milvus.consistency_level == "Strong"
 
 
 def test_dict_to_config_ignores_unknown_fields_and_non_dict_sections() -> None:

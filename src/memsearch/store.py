@@ -33,6 +33,7 @@ class MilvusStore:
         collection: str = DEFAULT_COLLECTION,
         dimension: int | None = 1536,
         description: str = "",
+        consistency_level: str = "",
     ) -> None:
         from pymilvus import MilvusClient
 
@@ -69,7 +70,43 @@ class MilvusStore:
         self._collection = collection
         self._dimension = dimension
         self._description = description
+        # Read-path consistency override. Milvus Lite is locally strong-consistent,
+        # so the level only matters for remote: default "Bounded" lags freshly-upserted
+        # data by ~seconds, which makes cross-process read-after-write (watcher writes,
+        # recall searches) miss new chunks. Setting "Strong" closes that window. Empty =
+        # inherit the collection default (current behaviour). Never sent for Lite.
+        self._consistency_level = consistency_level
         self._ensure_collection()
+
+    def _consistency_kwargs(self) -> dict[str, str]:
+        """consistency_level kwarg for read ops — only on remote when explicitly set."""
+        if self._is_lite or not self._consistency_level:
+            return {}
+        return {"consistency_level": self._consistency_level}
+
+    def _nonempty(self) -> bool:
+        """Whether the collection holds any rows.
+
+        ``get_collection_stats`` counts only *sealed* segments, so on remote a fresh
+        collection whose first writes aren't auto-flushed yet reports row_count=0 even
+        though the data exists in growing segments. When a consistency override is in
+        effect, confirm true emptiness with a consistency-honouring point query before
+        short-circuiting — otherwise the BM25 empty-guard would drop just-written data.
+        """
+        row_count = int(self._client.get_collection_stats(self._collection).get("row_count", 0))
+        if row_count > 0:
+            return True
+        cons = self._consistency_kwargs()
+        if not cons:
+            return False
+        probe = self._client.query(
+            collection_name=self._collection,
+            filter='chunk_hash != ""',
+            output_fields=["chunk_hash"],
+            limit=1,
+            **cons,
+        )
+        return bool(probe)
 
     def _ensure_collection(self) -> None:
         if self._client.has_collection(self._collection):
@@ -169,8 +206,7 @@ class MilvusStore:
         from pymilvus import AnnSearchRequest, RRFRanker
 
         # BM25 crashes on empty collections (avgdl=0 → NaN). See #306.
-        stats = self._client.get_collection_stats(self._collection)
-        if int(stats.get("row_count", 0)) == 0:
+        if not self._nonempty():
             return []
 
         req_kwargs: dict[str, Any] = {}
@@ -201,6 +237,7 @@ class MilvusStore:
             ranker=RRFRanker(k=rrf_k),
             limit=top_k,
             output_fields=self._QUERY_FIELDS,
+            **self._consistency_kwargs(),
         )
 
         if not results or not results[0]:
@@ -225,8 +262,7 @@ class MilvusStore:
     ) -> list[list[dict[str, Any]]]:
         """Per-vector dense COSINE search. One hit-list per input vector;
         each hit = {"chunk_hash": str, "score": float}  (score = cosine similarity in [-1,1])."""
-        stats = self._client.get_collection_stats(self._collection)
-        if int(stats.get("row_count", 0)) == 0:
+        if not self._nonempty():
             return [[] for _ in embeddings]
 
         search_kwargs: dict[str, Any] = {
@@ -236,6 +272,7 @@ class MilvusStore:
             "search_params": {"metric_type": "COSINE", "params": {}},
             "limit": top_k,
             "output_fields": ["chunk_hash"],
+            **self._consistency_kwargs(),
         }
         if filter_expr:
             search_kwargs["filter"] = filter_expr
@@ -269,6 +306,7 @@ class MilvusStore:
             "collection_name": self._collection,
             "output_fields": self._QUERY_FIELDS,
             "filter": filter_expr if filter_expr else 'chunk_hash != ""',
+            **self._consistency_kwargs(),
         }
         return self._client.query(**kwargs)
 

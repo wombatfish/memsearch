@@ -43,3 +43,29 @@ def test_chunk_size_flag_appears_in_help(args: list[str]) -> None:
 
     assert result.exit_code == 0
     assert "--max-chunk-size" in result.output
+
+
+def test_search_help_mentions_consistency() -> None:
+    result = CliRunner().invoke(cli, ["search", "--help"])
+    assert result.exit_code == 0
+    assert "--consistency" in result.output
+
+
+def test_search_consistency_flag_reaches_constructor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--consistency strong` must arrive as the MemSearch consistency_level kwarg."""
+    captured: dict = {}
+
+    class FakeMS:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+
+        async def search(self, *args, **kwargs):
+            return []
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("memsearch.core.MemSearch", FakeMS)
+    result = CliRunner().invoke(cli, ["search", "foo", "--consistency", "strong"])
+    assert result.exit_code == 0, result.output
+    assert captured.get("consistency_level") == "strong"
