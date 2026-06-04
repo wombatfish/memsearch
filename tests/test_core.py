@@ -4,14 +4,21 @@ Requires OPENAI_API_KEY to be set.
 """
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.skipif(
-    not os.environ.get("OPENAI_API_KEY"),
-    reason="OPENAI_API_KEY not set",
-)
+pytestmark = [
+    pytest.mark.skipif(
+        not os.environ.get("OPENAI_API_KEY"),
+        reason="OPENAI_API_KEY not set",
+    ),
+    pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="milvus-lite is unsupported on Windows",
+    ),
+]
 
 
 @pytest.fixture

@@ -45,6 +45,7 @@ def test_normalize_compact_source_expands_user_home(monkeypatch, tmp_path: Path)
     note.write_text("# note\n")
 
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))  # Windows expanduser reads USERPROFILE, not HOME
 
     normalized = cli_module._normalize_compact_source("~/memory/old-notes.md")
 

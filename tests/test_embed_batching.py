@@ -6,6 +6,7 @@ split into batches that respect the provider's batch_size limit.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,12 @@ from memsearch.chunker import Chunk
 from memsearch.core import MemSearch
 from memsearch.embeddings.utils import batched_embed
 from memsearch.store import MilvusStore
+
+# Tests that instantiate MilvusStore against a local URI require milvus-lite,
+# which has no Windows wheels. The batched_embed utility tests above need no skip.
+_requires_milvus_lite = pytest.mark.skipif(
+    sys.platform == "win32", reason="milvus-lite is unsupported on Windows"
+)
 
 # -- batched_embed utility tests --
 
@@ -127,6 +134,7 @@ def _make_chunks(n: int) -> list[Chunk]:
     ]
 
 
+@_requires_milvus_lite
 @pytest.mark.asyncio
 async def test_embed_and_store_batching(mem_with_fake):
     ms, fake = mem_with_fake
@@ -137,6 +145,7 @@ async def test_embed_and_store_batching(mem_with_fake):
     assert fake.call_sizes == [4, 4, 2]
 
 
+@_requires_milvus_lite
 @pytest.mark.asyncio
 async def test_embed_and_store_under_limit(mem_with_fake):
     ms, fake = mem_with_fake
@@ -146,6 +155,7 @@ async def test_embed_and_store_under_limit(mem_with_fake):
     assert fake.call_sizes == [3]
 
 
+@_requires_milvus_lite
 @pytest.mark.asyncio
 async def test_embed_and_store_empty(mem_with_fake):
     ms, fake = mem_with_fake
@@ -157,6 +167,7 @@ async def test_embed_and_store_empty(mem_with_fake):
 # -- Error isolation tests --
 
 
+@_requires_milvus_lite
 @pytest.mark.asyncio
 async def test_index_continues_after_file_failure(tmp_path: Path):
     """A file that fails to index should not prevent other files from indexing."""

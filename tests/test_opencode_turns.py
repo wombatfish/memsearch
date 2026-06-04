@@ -274,7 +274,7 @@ def test_turn_sidecar_persists_state_and_turns(tmp_path: Path) -> None:
     rows = load_session_turn_rows(turn_db, "ses_1")
     state = load_turn_state(turn_db, "ses_1")
 
-    assert get_turn_db_path(str(project_dir)).endswith(".memsearch/opencode-turns.db")
+    assert get_turn_db_path(str(project_dir)).replace("\\", "/").endswith(".memsearch/opencode-turns.db")
     assert len(rows) == 1
     assert rows[0]["turn_id"] == "u1"
     assert state.last_completed_turn_id == "u1"
@@ -661,6 +661,7 @@ def test_capture_session_turns_uses_legacy_last_msg_time_before_sidecar_exists(
         "",
         "memsearch",
         str(db_path),
+        project_dir=str(project_dir),
     )
 
     rows = load_session_turn_rows(turn_db, session_id)
