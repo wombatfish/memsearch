@@ -6,8 +6,10 @@ import asyncio
 import hashlib
 import json
 import os
+import posixpath
 import re
 import sys
+import time
 from pathlib import Path
 
 import click
@@ -30,6 +32,10 @@ def _derive_collection_name(path: str) -> str:
     p = re.sub(r"/+", "/", p)
     if len(p) > 1 and p.endswith("/") and not p.endswith(":/"):
         p = p[:-1]
+    # Collapse `.`/`..` segments for `realpath -m` bash-parity. Use posixpath
+    # (not os.path): on Windows os.path.normpath rewrites `/`->`\`, which would
+    # change the hash of every canonical path and orphan existing indexes.
+    p = posixpath.normpath(p)
 
     basename = p.rsplit("/", 1)[-1]
     sanitized = basename.lower()
@@ -46,7 +52,9 @@ from .config import (
     PROJECT_CONFIG_PATH,
     ConfigEnvVarError,
     MemSearchConfig,
+    _dict_to_config,
     config_to_dict,
+    deep_merge,
     get_config_value,
     load_config_file,
     resolve_config,
@@ -72,6 +80,31 @@ def _safe_resolve_config(overrides: dict | None = None):
     except ConfigEnvVarError as e:
         click.echo(f"Configuration error: {e}", err=True)
         raise SystemExit(1) from None
+
+
+# -- Secret masking for config display --
+_SECRET_LEAF_RE = re.compile(r"(?:api_key|token)$", re.IGNORECASE)
+
+
+def _is_secret_key(dotted_or_leaf: str) -> bool:
+    return bool(_SECRET_LEAF_RE.search(dotted_or_leaf.rsplit(".", 1)[-1]))
+
+
+def _mask_secret(value) -> str:
+    s = str(value)
+    return (s[:3] + "***") if len(s) > 3 else "***"
+
+
+def _mask_config_secrets(data: dict) -> dict:  # recursive — must reach llm.providers.<name>.api_key
+    out = {}
+    for k, v in data.items():
+        if isinstance(v, dict):
+            out[k] = _mask_config_secrets(v)
+        elif _is_secret_key(k) and v and not (isinstance(v, str) and v.startswith("env:")):
+            out[k] = _mask_secret(v)
+        else:
+            out[k] = v
+    return out
 
 
 # -- CLI param name → dotted config key mapping --
@@ -305,7 +338,7 @@ def index(
 
 @cli.command()
 @click.argument("query")
-@click.option("--top-k", "-k", default=None, type=int, help="Number of results.")
+@click.option("--top-k", "-k", default=None, type=click.IntRange(min=1), help="Number of results.")
 @click.option(
     "--source-prefix",
     default=None,
@@ -406,7 +439,9 @@ def search(
 @cli.command()
 @click.argument("chunk_hash")
 @click.option("--section/--no-section", default=True, help="Show full heading section (default).")
-@click.option("--lines", "-n", default=None, type=int, help="Show N lines before/after instead of full section.")
+@click.option(
+    "--lines", "-n", default=None, type=click.IntRange(min=0), help="Show N lines before/after instead of full section."
+)
 @click.option("--json-output", "-j", is_flag=True, help="Output as JSON.")
 @_common_options
 def expand(
@@ -430,6 +465,10 @@ def expand(
 
     Part of the progressive disclosure workflow (search -> expand -> transcript).
     """
+    if not re.fullmatch(r"[0-9a-fA-F]{1,64}", chunk_hash):
+        click.echo(f"Invalid chunk hash: {chunk_hash!r}", err=True)
+        sys.exit(1)
+
     from .store import MilvusStore
 
     cfg = _safe_resolve_config(
@@ -478,17 +517,20 @@ def expand(
             expanded = "\n".join(all_lines[ctx_start:ctx_end])
             expanded_start = ctx_start + 1
             expanded_end = ctx_end
-        else:
-            # Show full section under the same heading
+        elif section:
+            # Show full section under the same heading (default)
             expanded, expanded_start, expanded_end = _extract_section(
                 all_lines,
                 start_line,
                 heading_level,
             )
+        else:
+            # --no-section without --lines: show only the chunk's own lines
+            expanded = "\n".join(all_lines[start_line - 1 : end_line])
+            expanded_start = start_line
+            expanded_end = end_line
 
         # Parse any anchor comments in the expanded text
-        import re
-
         anchor_match = re.search(
             r"<!--\s*session:(\S+)\s+turn:(\S+)\s+transcript:(\S+)\s*-->",
             expanded,
@@ -568,7 +610,7 @@ def _extract_section(
 @cli.command()
 @click.argument("paths", nargs=-1, required=True, type=click.Path(exists=True))
 @_common_options
-@click.option("--debounce-ms", default=None, type=int, help="Debounce delay in ms.")
+@click.option("--debounce-ms", default=None, type=click.IntRange(min=1), help="Debounce delay in ms.")
 @click.option(
     "--max-chunk-size", default=None, type=click.IntRange(min=1), help="Max chunk size in characters (must be >= 1)."
 )
@@ -654,8 +696,6 @@ def watch(
         click.echo(f"Watching {len(paths)} path(s) for changes... (Ctrl+C to stop)")
         watcher = ms.watch(on_event=_on_event, debounce_ms=cfg.watch.debounce_ms)
         while True:
-            import time
-
             time.sleep(1)
     except KeyboardInterrupt:
         click.echo("\nStopping watcher.")
@@ -981,8 +1021,8 @@ def config_init(project: bool) -> None:
     """Interactive configuration wizard."""
 
     target = PROJECT_CONFIG_PATH if project else GLOBAL_CONFIG_PATH
-    load_config_file(target)
-    current = resolve_config()
+    raw = load_config_file(target)
+    current = _dict_to_config(deep_merge(config_to_dict(MemSearchConfig()), raw))
 
     result: dict = {}
 
@@ -1202,7 +1242,8 @@ def config_set(key: str, value: str, project: bool) -> None:
     try:
         set_config_value(key, value, project=project)
         target = PROJECT_CONFIG_PATH if project else GLOBAL_CONFIG_PATH
-        click.echo(f"Set {key} = {value} in {target}")
+        shown = _mask_secret(value) if (_is_secret_key(key) and value and not str(value).startswith("env:")) else value
+        click.echo(f"Set {key} = {shown} in {target}")
     except (KeyError, ValueError) as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -1215,6 +1256,9 @@ def config_get(key: str) -> None:
     try:
         val = get_config_value(key)
         click.echo(val)
+    except ConfigEnvVarError as e:
+        click.echo(f"Configuration error: {e}", err=True)
+        sys.exit(1)
     except KeyError as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -1224,7 +1268,8 @@ def config_get(key: str) -> None:
 @click.option("--resolved", "mode", flag_value="resolved", default=True, help="Show fully resolved config (default).")
 @click.option("--global", "mode", flag_value="global", help="Show global config file only.")
 @click.option("--project", "mode", flag_value="project", help="Show project config file only.")
-def config_list(mode: str) -> None:
+@click.option("--show-secrets", is_flag=True, help="Show api_key/token values in plaintext.")
+def config_list(mode: str, show_secrets: bool) -> None:
     """Show configuration."""
     import tomli_w
 
@@ -1235,9 +1280,12 @@ def config_list(mode: str) -> None:
         data = load_config_file(PROJECT_CONFIG_PATH)
         label = f"Project ({PROJECT_CONFIG_PATH})"
     else:
-        cfg = resolve_config()
+        cfg = _safe_resolve_config()
         data = config_to_dict(cfg)
         label = "Resolved (all sources merged)"
+
+    if not show_secrets:
+        data = _mask_config_secrets(data)
 
     click.echo(f"# {label}\n")
     if data:

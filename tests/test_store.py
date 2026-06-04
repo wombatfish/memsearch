@@ -1,5 +1,6 @@
 """Tests for the Milvus store."""
 
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -8,15 +9,35 @@ import pytest
 from memsearch.store import MilvusStore
 
 
+class _FakeIterator:
+    """Minimal iterator returned by _FakeClient.query_iterator."""
+
+    def __init__(self, batch: list[dict]) -> None:
+        self._batch = batch
+        self._done = False
+
+    def next(self) -> list[dict]:
+        if self._done:
+            return []
+        self._done = True
+        return self._batch
+
+    def close(self) -> None:
+        pass
+
+
 class _FakeClient:
     """Records read-call kwargs without touching a real Milvus (runs on Windows)."""
 
     def __init__(self, *, row_count: int = 5, query_result: list[dict] | None = None) -> None:
         self._row_count = row_count
-        self._query_result = query_result if query_result is not None else [{"chunk_hash": "h1"}]
+        self._query_result = (
+            query_result if query_result is not None else [{"chunk_hash": "h1", "source": "s.md"}]
+        )
         self.search_kwargs: dict[str, Any] | None = None
         self.hybrid_kwargs: dict[str, Any] | None = None
         self.query_calls: list[dict[str, Any]] = []
+        self.query_iterator_kwargs: dict[str, Any] = {}
 
     def get_collection_stats(self, collection_name: str) -> dict[str, int]:
         return {"row_count": self._row_count}
@@ -24,6 +45,11 @@ class _FakeClient:
     def query(self, **kwargs: Any) -> list[dict]:
         self.query_calls.append(kwargs)
         return self._query_result
+
+    def query_iterator(self, **kwargs: Any) -> _FakeIterator:
+        self.query_iterator_kwargs = kwargs
+        return _FakeIterator([{"chunk_hash": "h1", "source": "s.md", "content": "", "heading": "",
+                               "heading_level": 0, "start_line": 1, "end_line": 1}])
 
     def search(self, **kwargs: Any) -> list:
         self.search_kwargs = kwargs
@@ -97,6 +123,36 @@ def test_dense_search_lite_omits_consistency():
     assert "consistency_level" not in s._client.search_kwargs
 
 
+def test_iter_chunks_passes_consistency_on_remote():
+    s = _bare_store(is_lite=False, consistency="Strong")
+    list(s.iter_chunks())
+    assert s._client.query_iterator_kwargs["consistency_level"] == "Strong"
+
+
+def test_iter_chunks_lite_omits_consistency():
+    s = _bare_store(is_lite=True, consistency="Strong")
+    list(s.iter_chunks())
+    assert "consistency_level" not in s._client.query_iterator_kwargs
+
+
+def test_hashes_by_source_passes_consistency_on_remote():
+    s = _bare_store(is_lite=False, consistency="Strong")
+    s.hashes_by_source("a.md")
+    assert s._client.query_calls[0]["consistency_level"] == "Strong"
+
+
+def test_hashes_by_source_lite_omits_consistency():
+    s = _bare_store(is_lite=True, consistency="Strong")
+    s.hashes_by_source("a.md")
+    assert "consistency_level" not in s._client.query_calls[0]
+
+
+def test_indexed_sources_passes_consistency_on_remote():
+    s = _bare_store(is_lite=False, consistency="Strong")
+    s.indexed_sources()
+    assert s._client.query_calls[0]["consistency_level"] == "Strong"
+
+
 # --- cold-start guard: sealed-segment row_count=0 must not drop unsealed data ---
 
 
@@ -138,6 +194,7 @@ def store(tmp_path: Path):
     s.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="milvus-lite is unsupported on Windows")
 def test_upsert_and_search(store: MilvusStore):
     chunks = [
         {
@@ -169,6 +226,7 @@ def test_upsert_and_search(store: MilvusStore):
     assert results[0]["content"] == "Hello world"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="milvus-lite is unsupported on Windows")
 def test_delete_by_source(store: MilvusStore):
     chunks = [
         {
@@ -199,6 +257,7 @@ def test_delete_by_source(store: MilvusStore):
     assert "a.md" not in sources
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="milvus-lite is unsupported on Windows")
 def test_upsert_is_idempotent(store: MilvusStore):
     chunk = {
         "embedding": [1.0, 0.0, 0.0, 0.0],
@@ -218,6 +277,7 @@ def test_upsert_is_idempotent(store: MilvusStore):
     assert hashes.count("same_hash") == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="milvus-lite is unsupported on Windows")
 def test_hybrid_search(store: MilvusStore):
     chunks = [
         {
@@ -253,6 +313,7 @@ def test_hybrid_search(store: MilvusStore):
     assert results[0]["content"].startswith("Redis")
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="milvus-lite is unsupported on Windows")
 def test_dimension_mismatch(tmp_path: Path):
     db = str(tmp_path / "dim_test.db")
     # Create collection with dim=4
@@ -263,6 +324,7 @@ def test_dimension_mismatch(tmp_path: Path):
         MilvusStore(uri=db, dimension=8)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="milvus-lite is unsupported on Windows")
 def test_reopened_collection_is_loaded_for_query(tmp_path: Path):
     db = str(tmp_path / "reopen_test.db")
     chunk = {
@@ -289,6 +351,7 @@ def test_reopened_collection_is_loaded_for_query(tmp_path: Path):
     assert [r["chunk_hash"] for r in results] == ["reopen_hash"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="milvus-lite is unsupported on Windows")
 def test_drop(store: MilvusStore):
     chunk = {
         "embedding": [1.0, 0.0, 0.0, 0.0],
@@ -309,6 +372,7 @@ def test_drop(store: MilvusStore):
     assert len(results) == 0
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="milvus-lite is unsupported on Windows")
 def test_collection_description(tmp_path: Path):
     """Collection should store the description when provided."""
     db = str(tmp_path / "desc_test.db")
@@ -319,6 +383,7 @@ def test_collection_description(tmp_path: Path):
     s.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="milvus-lite is unsupported on Windows")
 def test_collection_description_empty_by_default(tmp_path: Path):
     """Collection should have empty description when not provided."""
     db = str(tmp_path / "desc_default_test.db")

@@ -10,6 +10,8 @@ from typing import Any, ClassVar
 
 logger = logging.getLogger(__name__)
 
+_RRF_K = 60  # standard RRF k from Cormack et al.; tune here, used by core graph fusion too
+
 
 def _escape_filter_value(value: str) -> str:
     """Escape backslashes and double quotes for Milvus filter expressions."""
@@ -238,7 +240,7 @@ class MilvusStore:
         )
 
         reqs = [dense_req, bm25_req]
-        rrf_k = 60
+        rrf_k = _RRF_K
         results = self._client.hybrid_search(
             collection_name=self._collection,
             reqs=reqs,
@@ -300,6 +302,7 @@ class MilvusStore:
             batch_size=1000,
             filter='chunk_hash != ""',
             output_fields=output_fields,
+            **self._consistency_kwargs(),
         )
         while True:
             batch = it.next()
@@ -325,6 +328,7 @@ class MilvusStore:
             collection_name=self._collection,
             filter=f'source == "{escaped}"',
             output_fields=["chunk_hash"],
+            **self._consistency_kwargs(),
         )
         return {r["chunk_hash"] for r in results}
 
@@ -334,6 +338,7 @@ class MilvusStore:
             collection_name=self._collection,
             filter='chunk_hash != ""',
             output_fields=["source"],
+            **self._consistency_kwargs(),
         )
         return {r["source"] for r in results}
 

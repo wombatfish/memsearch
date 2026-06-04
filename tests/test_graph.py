@@ -8,11 +8,17 @@ any host (including Windows, where milvus-lite has no wheels).
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
+from pathlib import Path
 from typing import Any
+
+import pytest
 
 from memsearch.core import MemSearch, _is_section_head, _structural_edges
 from memsearch.edges import EdgeStore
+from memsearch.scanner import ScannedFile
 
 
 def _same_section(edges: list[tuple[str, str, str, float, str]]) -> list[tuple[str, str]]:
@@ -417,3 +423,147 @@ def test_is_empty_for_scopes_to_given_hashes(tmp_path):
         assert store.is_empty_for([]) is True  # no hashes → vacuously empty
     finally:
         store.close()
+
+
+# ----------------------------------------------------------------------
+# D) watch()'s _dispatch_event concurrency + search() source_prefix escaping
+# ----------------------------------------------------------------------
+
+
+def test_dispatch_event_serializes_concurrent_callbacks(caplog):
+    """Two debounce Timer threads firing _dispatch_event at once must BOTH be
+    processed.  Without the lock the second thread drives run_until_complete on
+    the already-running loop and raises "event loop is already running", silently
+    dropping its file."""
+    processed: list[str] = []
+
+    async def slow_index(path: Path) -> int:
+        await asyncio.sleep(0.05)
+        processed.append(str(path))
+        return 1
+
+    m = MemSearch.__new__(MemSearch)
+    m._watch_loop = asyncio.new_event_loop()
+    m._watch_lock = threading.Lock()
+    m._watch_on_event = None
+    m._edges = None
+
+    class _StubStore:
+        def delete_by_source(self, source: str) -> None:
+            pass
+
+        def hashes_by_source(self, source: str) -> set[str]:
+            return set()
+
+    m._store = _StubStore()
+    m.index_file = slow_index  # type: ignore[method-assign]
+
+    t1 = threading.Thread(target=m._dispatch_event, args=("modified", Path("a.md")))
+    t2 = threading.Thread(target=m._dispatch_event, args=("modified", Path("b.md")))
+    with caplog.at_level(logging.ERROR, logger="memsearch.core"):
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+    m._watch_loop.close()
+
+    assert set(processed) == {"a.md", "b.md"}  # both files indexed, none dropped
+    assert "already running" not in caplog.text
+
+
+async def test_search_source_prefix_escapes_wildcards_and_bounds_path():
+    """source_prefix must escape LIKE wildcards (% and _) and produce both an
+    equality clause (the prefix itself) and a path-bounded LIKE clause, so
+    `/repo/docs_v1` does not match `/repo/docs_v2/...`."""
+
+    class _FilterStore:
+        def search(self, emb, *, query_text: str = "", top_k: int = 10, filter_expr: str = "") -> list[dict[str, Any]]:
+            self.last_filter = filter_expr
+            return []
+
+    stub = _FilterStore()
+    m = MemSearch.__new__(MemSearch)
+    m._embedder = _FakeEmbedder()
+    m._reranker_model = ""
+    m._store = stub
+    m._graph_enabled = False
+    m._edges = None
+
+    await m.search("q", source_prefix="/repo/docs_v1")
+
+    assert "\\_" in stub.last_filter  # underscore escaped (no longer a LIKE wildcard)
+    assert "source == " in stub.last_filter  # equality clause for the prefix itself
+    assert "source like " in stub.last_filter  # path-bounded LIKE clause
+
+
+# ----------------------------------------------------------------------
+# E) _index_file embed-first reorder: new chunks are stored BEFORE stale
+#    ones are deleted, so an embed failure never opens a transient hole.
+# ----------------------------------------------------------------------
+
+
+class _StaleSpyStore:
+    """Store stub: canned hashes_by_source + a recording delete_by_hashes spy."""
+
+    def __init__(self, old_ids: set[str]) -> None:
+        self._old_ids = old_ids
+        self.delete_calls: list[list[str]] = []
+
+    def hashes_by_source(self, source: str) -> set[str]:
+        return set(self._old_ids)
+
+    def delete_by_hashes(self, hashes: list[str]) -> None:
+        self.delete_calls.append(list(hashes))
+
+
+def _make_index_mem(store: _StaleSpyStore) -> MemSearch:
+    """Minimal mem for _index_file. _edges=None short-circuits the structural-edge
+    block, so _graph_structural / replace_structural_edges are never evaluated."""
+    m = MemSearch.__new__(MemSearch)
+    m._edges = None
+    m._store = store
+    m._embedder = _FakeEmbedder()
+    m._max_chunk_size = 1500
+    m._overlap_lines = 2
+    return m
+
+
+def test_index_file_keeps_stale_chunks_when_embed_fails(tmp_path):
+    """Embed failure on new chunks must propagate AND leave the existing/stale
+    chunks intact — delete_by_hashes is never reached when embedding raises."""
+    f = tmp_path / "doc.md"
+    f.write_text("# Title\n\nfresh body that yields a new chunk id\n", encoding="utf-8")
+    # Sentinel old id can't equal the real computed chunk id, so it is stale AND
+    # to_embed is non-empty (the new chunk's id is not in old_ids).
+    store = _StaleSpyStore({"stale_sentinel"})
+    m = _make_index_mem(store)
+
+    async def _boom(chunks):
+        raise RuntimeError("embed API down")
+
+    m._embed_and_store = _boom  # type: ignore[method-assign]
+
+    sf = ScannedFile(path=f, mtime=0.0, size=f.stat().st_size)
+    with pytest.raises(RuntimeError, match="embed API down"):
+        asyncio.run(m._index_file(sf))
+
+    assert store.delete_calls == []  # stale chunk NOT deleted — no transient hole
+
+
+def test_index_file_emptied_file_still_deletes_stale(tmp_path):
+    """An emptied file (no chunks → empty to_embed) must still delete the old
+    chunks — the emptied-file stale-delete the reorder must preserve."""
+    f = tmp_path / "doc.md"
+    f.write_text("", encoding="utf-8")
+    old = {"old1", "old2"}
+    store = _StaleSpyStore(old)
+    m = _make_index_mem(store)
+    # _embed_and_store must not run for an empty file; assert by sabotaging it.
+    m._embed_and_store = None  # type: ignore[assignment]
+
+    sf = ScannedFile(path=f, mtime=0.0, size=0)
+    n = asyncio.run(m._index_file(sf))
+
+    assert n == 0
+    assert len(store.delete_calls) == 1
+    assert set(store.delete_calls[0]) == old  # exactly the old set (order nondeterministic)

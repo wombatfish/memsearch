@@ -14,6 +14,10 @@ from typing import Any
 
 from .config import resolve_env_ref
 
+# Cap the combined chunk text fed to the LLM. High threshold so it is a strict
+# no-op for normal inputs; only oversized chunk sets are truncated.
+MAX_COMBINED_CHARS = 80_000
+
 COMPACT_PROMPT = """\
 You are a knowledge compression assistant. Given the following chunks of text \
 from a knowledge base, create a concise but comprehensive summary that preserves \
@@ -52,8 +56,8 @@ async def compact_chunks(
         Custom base URL for OpenAI-compatible API endpoints.  Only used
         when *llm_provider* is ``"openai"``.
     api_key:
-        API key for the LLM provider.  Only used when *llm_provider* is
-        ``"openai"``.
+        API key for the LLM provider.  Applies to all three providers
+        (``"openai"``, ``"anthropic"``, ``"gemini"``).
 
     Returns
     -------
@@ -63,6 +67,8 @@ async def compact_chunks(
     if not chunks:
         return ""
     combined = "\n\n---\n\n".join(c["content"] for c in chunks)
+    if len(combined) > MAX_COMBINED_CHARS:
+        combined = combined[:MAX_COMBINED_CHARS] + "\n\n[truncated]\n"
     template = prompt_template or COMPACT_PROMPT
     if "{chunks}" not in template:
         raise ValueError("prompt_template must include the {chunks} placeholder")
@@ -71,9 +77,9 @@ async def compact_chunks(
     if llm_provider == "openai":
         return await _compact_openai(prompt, model or "gpt-5-mini", base_url=base_url, api_key=api_key)
     elif llm_provider == "anthropic":
-        return await _compact_anthropic(prompt, model or "claude-sonnet-4-6")
+        return await _compact_anthropic(prompt, model or "claude-sonnet-4-6", api_key=api_key)
     elif llm_provider == "gemini":
-        return await _compact_gemini(prompt, model or "gemini-3-flash-preview")
+        return await _compact_gemini(prompt, model or "gemini-3-flash-preview", api_key=api_key)
     else:
         raise ValueError(f"Unknown LLM provider {llm_provider!r}. Available: openai, anthropic, gemini")
 
@@ -91,9 +97,9 @@ async def summarize_text(
     if provider == "openai":
         return await _compact_openai(prompt, model or "gpt-5-mini", base_url=base_url, api_key=api_key)
     if provider == "anthropic":
-        return await _compact_anthropic(prompt, model or "claude-sonnet-4-6")
+        return await _compact_anthropic(prompt, model or "claude-sonnet-4-6", api_key=api_key)
     if provider == "gemini":
-        return await _compact_gemini(prompt, model or "gemini-3-flash-preview")
+        return await _compact_gemini(prompt, model or "gemini-3-flash-preview", api_key=api_key)
     raise ValueError(
         f"Unknown LLM provider type {llm_provider!r}. Available: openai, openai-compatible, anthropic, gemini"
     )
@@ -117,10 +123,11 @@ async def _compact_openai(prompt: str, model: str, *, base_url: str | None = Non
     return resp.choices[0].message.content or ""
 
 
-async def _compact_anthropic(prompt: str, model: str) -> str:
+async def _compact_anthropic(prompt: str, model: str, *, api_key: str | None = None) -> str:
     import anthropic
 
-    client = anthropic.AsyncAnthropic()  # reads ANTHROPIC_API_KEY
+    resolved = resolve_env_ref(api_key) if api_key else None
+    client = anthropic.AsyncAnthropic(api_key=resolved) if resolved else anthropic.AsyncAnthropic()
     resp = await client.messages.create(
         model=model,
         max_tokens=4096,
@@ -129,10 +136,11 @@ async def _compact_anthropic(prompt: str, model: str) -> str:
     return resp.content[0].text
 
 
-async def _compact_gemini(prompt: str, model: str) -> str:
+async def _compact_gemini(prompt: str, model: str, *, api_key: str | None = None) -> str:
     from google import genai
 
-    client = genai.Client()  # reads GOOGLE_API_KEY
+    resolved = resolve_env_ref(api_key) if api_key else None
+    client = genai.Client(api_key=resolved) if resolved else genai.Client()
     resp = await client.aio.models.generate_content(
         model=model,
         contents=prompt,

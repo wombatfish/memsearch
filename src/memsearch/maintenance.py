@@ -26,9 +26,27 @@ from .config import (
 )
 
 TASKS = ("project_review", "user_profile")
-MAX_PROMPT_CHARS = 80_000
+MAX_PROMPT_CHARS = 80_000  # backstop only; per-section budgets keep the normal load well under this
+EXISTING_OUTPUT_BUDGET = 20_000
+JOURNAL_TOTAL_BUDGET = 46_000  # leaves headroom even when existing output is also at its budget
+PER_FILE_BUDGET = 8_000
 MAX_COMMAND_OUTPUT = 12_000
 MAX_TOOL_CALLS = 3
+
+# Common secret/key formats. Best-effort only: a user with secrets committed to
+# their memory journals should rotate them, not rely on this redaction.
+_SECRET_PATTERNS = (
+    re.compile(r"AKIA[0-9A-Z]{16}"),  # AWS access key id
+    re.compile(r"sk-[A-Za-z0-9]{20,}"),  # OpenAI-style key
+    re.compile(r"AIza[0-9A-Za-z_\-]{35}"),  # Google API key
+)
+
+
+def _scrub_secrets(text: str) -> str:
+    """Redact common API-key formats. Best-effort — rotate leaked secrets regardless."""
+    for pattern in _SECRET_PATTERNS:
+        text = pattern.sub("[REDACTED]", text)
+    return text
 
 
 @dataclass
@@ -215,7 +233,8 @@ def _build_prompt(ctx: TaskContext, cfg: MemSearchConfig) -> str:
         template = template.replace(marker, value)
 
     existing = ctx.output_file.read_text(encoding="utf-8") if ctx.output_file.is_file() else ""
-    journals = _read_recent_journals(ctx.input_dir)
+    existing = existing[:EXISTING_OUTPUT_BUDGET]
+    journals = _read_recent_journals(ctx.input_dir, max_total_chars=JOURNAL_TOTAL_BUDGET)
     prompt = f"""{template}
 
 ## Existing output file
@@ -249,14 +268,24 @@ def _load_prompt_template(task: str, cfg: MemSearchConfig) -> str:
         return f.read()
 
 
-def _read_recent_journals(input_dir: Path, max_files: int = 12) -> str:
+def _read_recent_journals(
+    input_dir: Path, max_files: int = 12, *, max_total_chars: int = JOURNAL_TOTAL_BUDGET
+) -> str:
     if not input_dir.is_dir():
         return ""
     chunks: list[str] = []
+    total = 0
     files = sorted((p for p in input_dir.rglob("*.md") if p.is_file()), key=lambda p: p.stat().st_mtime)[-max_files:]
     for path in files:
+        if total >= max_total_chars:
+            break
         with contextlib.suppress(OSError, UnicodeDecodeError):
-            chunks.append(f"\n<!-- source:{path} -->\n{path.read_text(encoding='utf-8')}")
+            # Scrub FIRST, then truncate: truncating first could split a secret
+            # token across the cut and leak its tail.
+            content = _scrub_secrets(path.read_text(encoding="utf-8"))[:PER_FILE_BUDGET]
+            chunk = f"\n<!-- source:{path} -->\n{content}"
+            chunks.append(chunk)
+            total += len(chunk)
     return "\n".join(chunks)
 
 
@@ -332,9 +361,13 @@ def _run_openai_with_tools(
         messages.append(msg.model_dump(exclude_none=True))
         for call in tool_calls:
             if tool_call_count < MAX_TOOL_CALLS:
-                args = json.loads(call.function.arguments or "{}")
-                output = run_memory_command(str(args.get("command", "")), ctx)
-                tool_call_count += 1
+                try:
+                    args = json.loads(call.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    output = "Error: invalid tool arguments"
+                else:
+                    output = run_memory_command(str(args.get("command", "")), ctx)
+                    tool_call_count += 1
             else:
                 output = "Error: memory tool call limit reached"
             messages.append(
@@ -436,8 +469,13 @@ def _run_gemini_with_tools(ctx: TaskContext, prompt: str, model: str | None, pro
     client = genai.Client(api_key=api_key) if api_key else genai.Client()
     chosen_model = model or "gemini-3-flash-preview"
 
+    calls = {"n": 0}
+
     def run_memory_command_tool(command: str) -> str:
         """Run a restricted read-only memsearch memory drill-down command."""
+        if calls["n"] >= MAX_TOOL_CALLS:
+            return "Error: memory tool call limit reached"
+        calls["n"] += 1
         return run_memory_command(command, ctx)
 
     resp = client.models.generate_content(
@@ -446,6 +484,13 @@ def _run_gemini_with_tools(ctx: TaskContext, prompt: str, model: str | None, pro
         config=types.GenerateContentConfig(tools=[run_memory_command_tool], temperature=0.2),
     )
     return resp.text or ""
+
+
+_FIND_DESTRUCTIVE_EXACT = {"-delete", "-fls", "-fprint", "-fprint0", "-fprintf", "-fput"}
+
+
+def _is_destructive_find_primary(tok: str) -> bool:
+    return tok in _FIND_DESTRUCTIVE_EXACT or tok.startswith("-exec") or tok.startswith("-ok") or tok.startswith("-fprint")
 
 
 def run_memory_command(command: str, ctx: TaskContext) -> str:
@@ -471,11 +516,13 @@ def run_memory_command(command: str, ctx: TaskContext) -> str:
             return checked
         return _run_restricted(argv, ctx.project_dir)
     if executable in {"find", "grep"}:
+        if executable == "find" and any(_is_destructive_find_primary(a) for a in argv[1:]):
+            return "Error: destructive find primary not allowed"
         checked = _validate_paths_in_args(argv[1:], allowed_roots, cwd=ctx.project_dir, allow_hash=False)
         if checked:
             return checked
         return _run_restricted(argv, ctx.project_dir)
-    if executable == "python3" and len(argv) >= 2 and argv[1].endswith("parse-transcript.py"):
+    if executable == "python3" and len(argv) >= 2 and Path(argv[1]).name == "parse-transcript.py":
         checked = _validate_paths_in_args(argv[1:], allowed_roots, cwd=ctx.project_dir, allow_hash=False)
         if checked:
             return checked
@@ -489,7 +536,7 @@ def _validate_paths_in_args(args: list[str], allowed_roots: list[Path], *, cwd: 
             continue
         if allow_hash and re.fullmatch(r"[a-fA-F0-9]{8,64}", arg):
             continue
-        if "/" not in arg and not arg.startswith("."):
+        if "/" not in arg and "\\" not in arg and not arg.startswith(".") and not re.match(r"^[A-Za-z]:", arg):
             continue
         path = Path(arg).expanduser()
         if not path.is_absolute():
@@ -554,13 +601,41 @@ def _save_state(path: Path, state: dict[str, Any]) -> None:
     path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    import sys
+
+    if sys.platform == "win32":
+        import ctypes
+
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 @contextlib.contextmanager
 def _file_lock(path: Path):
     try:
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
-        yield False
-        return
+        if not _reclaim_stale_lock(path):
+            yield False
+            return
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            yield False
+            return
     try:
         os.write(fd, str(os.getpid()).encode())
         yield True
@@ -568,6 +643,20 @@ def _file_lock(path: Path):
         os.close(fd)
         with contextlib.suppress(OSError):
             path.unlink()
+
+
+def _reclaim_stale_lock(path: Path) -> bool:
+    """Remove the lock file if its owner PID is dead/unreadable. Returns True if reclaimed."""
+    try:
+        owner_pid = int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        owner_pid = -1
+    if _pid_alive(owner_pid):
+        return False
+    with contextlib.suppress(OSError):
+        path.unlink()
+        return True
+    return False
 
 
 def _now() -> str:

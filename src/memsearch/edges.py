@@ -90,12 +90,17 @@ class EdgeStore:
         """Delete all edges where *hashes* appear as src OR dst."""
         if not hashes:
             return
-        ph = ",".join("?" * len(hashes))
+        # Batched in 500-hash slices, mirroring replace_all's batching for symmetry
+        # (each batch binds 2x the slice — src + dst IN-clauses). One trailing commit
+        # keeps every slice in a single transaction, as the un-batched form was.
         with self._lock:
-            self._conn.execute(
-                f"DELETE FROM chunk_edges WHERE src_hash IN ({ph}) OR dst_hash IN ({ph})",
-                hashes + hashes,
-            )
+            for i in range(0, len(hashes), 500):
+                batch = hashes[i : i + 500]
+                ph = ",".join("?" * len(batch))
+                self._conn.execute(
+                    f"DELETE FROM chunk_edges WHERE src_hash IN ({ph}) OR dst_hash IN ({ph})",
+                    batch + batch,
+                )
             self._conn.commit()
 
     def replace_all(self, owned: list[str], edges: list[tuple[str, str, str, float, str]]) -> None:
@@ -122,6 +127,28 @@ class EdgeStore:
                     batch = owned[i : i + 500]
                     ph = ",".join("?" * len(batch))
                     self._conn.execute(f"DELETE FROM chunk_edges WHERE src_hash IN ({ph})", batch)
+                if edges:
+                    self._conn.executemany("INSERT OR REPLACE INTO chunk_edges VALUES (?,?,?,?,?)", edges)
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def replace_structural_edges(self, owned: list[str], edges: list[tuple[str, str, str, float, str]]) -> None:
+        """Atomically replace this source's structural (sibling/same_section) edges:
+        delete prior sibling/same_section rows whose src is in *owned* (the source's
+        current chunk hashes), then bulk-insert *edges*, in ONE transaction. Relation-
+        scoped to ('sibling','same_section') so cross-file 'similar' edges survive.
+        Batched under SQLite's host-parameter ceiling; rolls back on failure."""
+        with self._lock:
+            try:
+                for i in range(0, len(owned), 500):
+                    batch = owned[i : i + 500]
+                    ph = ",".join("?" * len(batch))
+                    self._conn.execute(
+                        f"DELETE FROM chunk_edges WHERE relation IN ('sibling','same_section') AND src_hash IN ({ph})",
+                        batch,
+                    )
                 if edges:
                     self._conn.executemany("INSERT OR REPLACE INTO chunk_edges VALUES (?,?,?,?,?)", edges)
                 self._conn.commit()

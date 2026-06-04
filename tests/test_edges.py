@@ -82,6 +82,25 @@ def test_delete_by_hashes_both_directions(store):
 
 
 # ---------------------------------------------------------------------------
+# 5b. delete_by_hashes spanning more than one batch (mirrors replace_all's
+#     500-slice batching): deletes exactly the targeted rows, leaves the rest.
+# ---------------------------------------------------------------------------
+
+
+def test_delete_by_hashes_spans_multiple_batches(store):
+    # 501 targeted src hashes > one 500-hash batch → forces a second batch.
+    targeted = [f"t{i:03d}" for i in range(501)]
+    store.add_edges([(h, "common_dst", "rel", 1.0, "m") for h in targeted])
+    # One non-targeted edge whose endpoints are absent from `targeted`.
+    store.add_edges([("keep_src", "keep_dst", "rel", 0.5, "m")])
+
+    store.delete_by_hashes(targeted)
+
+    rows = store._conn.execute("SELECT src_hash, dst_hash, relation FROM chunk_edges").fetchall()
+    assert rows == [("keep_src", "keep_dst", "rel")]  # only the untargeted edge remains
+
+
+# ---------------------------------------------------------------------------
 # 6. clear() empties the table; is_empty() reflects the state
 # ---------------------------------------------------------------------------
 
@@ -144,3 +163,38 @@ def test_init_does_not_block_behind_a_writer(tmp_path):
         blocker.rollback()
         blocker.close()
     assert elapsed < 1.0, f"EdgeStore.__init__ stalled {elapsed:.2f}s behind a writer (DDL took a write lock)"
+
+
+# ---------------------------------------------------------------------------
+# 10. replace_structural_edges: relation-scoped + owned-scoped swap.
+#     Incremental reindex must drop stale sibling/same_section rows for this
+#     source's chunks while preserving cross-file `similar` edges.
+# ---------------------------------------------------------------------------
+
+
+def test_replace_structural_edges_scopes_relation_and_owned(store):
+    store.add_edges(
+        [
+            ("a", "b", "sibling", 1.0, "m"),
+            ("a", "c", "same_section", 0.6, "m"),
+            ("a", "z", "similar", 0.8, "m"),
+        ]
+    )
+    store.replace_structural_edges(["a", "b", "c"], [("a", "b", "sibling", 1.0, "m")])
+    rows = set(store._conn.execute("SELECT src_hash, dst_hash, relation FROM chunk_edges").fetchall())
+    assert ("a", "c", "same_section") not in rows  # stale structural edge dropped
+    assert ("a", "b", "sibling") in rows  # current structural edge present
+    assert ("a", "z", "similar") in rows  # cross-file similar edge preserved
+
+
+def test_replace_structural_edges_rolls_back_on_failure(store):
+    """A failed swap (malformed row) must roll back to the prior structural edge,
+    not leave it deleted."""
+    store.add_edges([("a", "b", "sibling", 1.0, "m")])
+    bad = [("a", "b", "sibling", 1.0, "m"), ("bad", "tuple")]  # 2nd tuple has wrong arity
+    try:
+        store.replace_structural_edges(["a"], bad)
+    except Exception:
+        pass
+    rows = store._conn.execute("SELECT src_hash, dst_hash, relation FROM chunk_edges").fetchall()
+    assert rows == [("a", "b", "sibling")]  # prior edge survived the rolled-back swap

@@ -134,3 +134,20 @@ def test_build_cli_overrides_graph_flag() -> None:
     # graph=None → no "graph" key (not set by user)
     overrides = cli_module._build_cli_overrides(graph=None)
     assert "graph" not in overrides
+
+
+def test_derive_collection_name_golden_canonical_paths() -> None:
+    """GOLDEN backstop against the orphan-index regression: canonical
+    forward-slashed inputs must hash to these EXACT names. These literals were
+    computed independently from the pre-normpath function, so they fail loudly
+    if any future change (e.g. ntpath.normpath rewriting `/`->`\\`) shifts the
+    derived collection name and silently orphans every existing Milvus index."""
+    assert cli_module._derive_collection_name("D:/Projects/x") == "ms_x_7d70789c"
+    assert cli_module._derive_collection_name("/home/u/proj") == "ms_proj_9c09f805"
+
+
+def test_derive_collection_name_normalizes_dot_segments() -> None:
+    """`.`/`..` segments must collapse so equivalent paths derive the SAME
+    collection name (posixpath.normpath parity with `realpath -m`)."""
+    assert cli_module._derive_collection_name("/a/b/../c") == cli_module._derive_collection_name("/a/c")
+    assert cli_module._derive_collection_name("/a/./c") == cli_module._derive_collection_name("/a/c")

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import threading
 from collections.abc import Callable
 from datetime import date
 from itertools import pairwise
@@ -18,7 +20,7 @@ from .compact import compact_chunks
 from .edges import EdgeStore
 from .embeddings import EmbeddingProvider, get_provider
 from .scanner import ScannedFile, scan_paths
-from .store import MilvusStore
+from .store import _RRF_K, MilvusStore
 
 logger = logging.getLogger(__name__)
 
@@ -210,16 +212,7 @@ class MemSearch:
         # Compute composite chunk IDs (matching OpenClaw format)
         chunk_ids = {compute_chunk_id(c.source, c.start_line, c.end_line, c.content_hash, model) for c in chunks}
         old_ids = self._store.hashes_by_source(source)
-
-        # Delete stale chunks that are no longer in the file
         stale = old_ids - chunk_ids
-        if stale:
-            self._store.delete_by_hashes(list(stale))
-            if self._edges is not None:
-                self._edges.delete_by_hashes(list(stale))
-
-        if not chunks:
-            return 0
 
         # Build structural edges from the FULL chunks list, before the `force`
         # filter reduces `chunks` to the edited-onward subset.
@@ -227,19 +220,33 @@ class MemSearch:
             items = [
                 (compute_chunk_id(c.source, c.start_line, c.end_line, c.content_hash, model), c.content) for c in chunks
             ]
-            self._edges.add_edges(_structural_edges(items, model))
+            self._edges.replace_structural_edges(list(chunk_ids), _structural_edges(items, model))
 
         if not force:
             # Only embed chunks whose ID doesn't already exist
-            chunks = [
+            to_embed = [
                 c
                 for c in chunks
                 if compute_chunk_id(c.source, c.start_line, c.end_line, c.content_hash, model) not in old_ids
             ]
-            if not chunks:
-                return 0
+        else:
+            to_embed = chunks
 
-        return await self._embed_and_store(chunks)
+        # Embed and upsert NEW chunks BEFORE deleting stale ones. If embedding
+        # fails, the source keeps its existing chunks rather than being left with
+        # neither old nor new content (transient store hole). Dedup is by
+        # chunk_hash PK, so a crash between upsert and the delete below at worst
+        # leaves both versions briefly — acceptable.
+        n = await self._embed_and_store(to_embed) if to_embed else 0
+
+        # Delete stale chunks (present before, absent now) only after the new
+        # chunks are durably stored.
+        if stale:
+            self._store.delete_by_hashes(list(stale))
+            if self._edges is not None:
+                self._edges.delete_by_hashes(list(stale))
+
+        return n
 
     async def _embed_and_store(self, chunks: list[Chunk]) -> int:
         if not chunks:
@@ -293,31 +300,48 @@ class MemSearch:
         """Rebuild chunk_edges from stored chunks/embeddings. No embedding API calls."""
         if self._edges is None:
             return 0
-        edges: list[tuple[str, str, str, float, str]] = []
-        rows = list(self._store.iter_chunks(with_embeddings=(self._graph_similar_top_n > 0)))
         model = self._embedder.model_name
+        edges: list[tuple[str, str, str, float, str]] = []
+        owned: list[str] = []
+        # Stream chunks rather than materialize the whole collection (each row
+        # carries a ~28KB embedding; list()ing 100k rows is ~2.8GB). iter_chunks
+        # returns a fresh iterator per call, so structural (no vectors) and
+        # similar (vectors) make separate streamed passes.
         if self._graph_structural:
-            by_src: dict[str, list[dict]] = {}
-            for r in rows:
-                by_src.setdefault(r["source"], []).append(r)
+            by_src: dict[str, list[tuple[int, str, str]]] = {}
+            for r in self._store.iter_chunks(with_embeddings=False):
+                owned.append(r["chunk_hash"])
+                by_src.setdefault(r["source"], []).append((r["start_line"], r["chunk_hash"], r["content"]))
             for src_rows in by_src.values():
-                src_rows.sort(key=lambda r: r["start_line"])
-                items = [(r["chunk_hash"], r["content"]) for r in src_rows]
-                edges += _structural_edges(items, model)
+                src_rows.sort(key=lambda t: t[0])
+                edges += _structural_edges([(h, c) for _sl, h, c in src_rows], model)
         if self._graph_similar_top_n > 0:
-            ids = [r["chunk_hash"] for r in rows]
-            vecs = [r["embedding"] for r in rows]
-            for i in range(0, len(vecs), 1024):
-                hits = self._store.dense_search(vecs[i : i + 1024], top_k=self._graph_similar_top_n + 1)
-                for own_id, hit_list in zip(ids[i : i + 1024], hits, strict=True):
+            batch_ids: list[str] = []
+            batch_vecs: list[list[float]] = []
+
+            def _flush() -> None:
+                hits = self._store.dense_search(batch_vecs, top_k=self._graph_similar_top_n + 1)
+                for own_id, hit_list in zip(batch_ids, hits, strict=True):
                     for h in hit_list:
                         nbr, sim = h["chunk_hash"], max(0.0, h["score"])
                         if nbr != own_id and sim >= self._graph_similar_threshold:
                             edges.append((own_id, nbr, "similar", sim, model))
+
+            for r in self._store.iter_chunks(with_embeddings=True):
+                if not self._graph_structural:
+                    owned.append(r["chunk_hash"])
+                batch_ids.append(r["chunk_hash"])
+                batch_vecs.append(r["embedding"])
+                if len(batch_vecs) >= 1024:
+                    _flush()
+                    batch_ids, batch_vecs = [], []
+            if batch_vecs:
+                _flush()
+        if not self._graph_structural and self._graph_similar_top_n <= 0:
+            owned = [r["chunk_hash"] for r in self._store.iter_chunks(with_embeddings=False)]
         # Atomic, collection-scoped swap: delete only this collection's prior edges
         # (edges.db is shared across collections — never global-truncate), never
         # expose an empty graph mid-rebuild, and roll back on a failed swap.
-        owned = [r["chunk_hash"] for r in rows]
         self._edges.replace_all(owned, edges)
         return len(edges)
 
@@ -352,9 +376,15 @@ class MemSearch:
         """
         filter_expr = ""
         if source_prefix is not None:
+            from .store import _escape_filter_value
+
             prefix = str(Path(source_prefix).expanduser().resolve())
-            escaped = prefix.replace("\\", "\\\\").replace('"', '\\"')
-            filter_expr = f'source like "{escaped}%"'
+
+            def _esc_like(v: str) -> str:
+                return _escape_filter_value(v).replace("%", "\\%").replace("_", "\\_")
+
+            prefix_with_sep = prefix if prefix.endswith(os.sep) else prefix + os.sep
+            filter_expr = f'source == "{_escape_filter_value(prefix)}" or source like "{_esc_like(prefix_with_sep)}%"'
 
         embeddings = await self._embedder.embed([query])
         fetch_k = top_k * 3 if self._reranker_model else top_k
@@ -381,13 +411,18 @@ class MemSearch:
     def _graph_expand(
         self, base: list[dict[str, Any]], *, top_k: int, filter_expr: str
     ) -> list[dict[str, Any]]:
-        rrf_k, w_g = 60, self._graph_weight
+        rrf_k, w_g = _RRF_K, self._graph_weight
         base_by_hash = {r["chunk_hash"]: r for r in base}
         base_rank = {h: i + 1 for i, h in enumerate(base_by_hash)}
         seeds = list(base_by_hash)[: self._graph_seed_k]
         edges = self._edges.neighbors(seeds, limit_per_node=self._graph_fanout)
         graph_score: dict[str, float] = {}
         for nbr, weight, seed in edges:
+            # Invariant: seeds come from list(base_by_hash), so every seed is a
+            # base key by construction. This guard is resilience-only.
+            if seed not in base_by_hash:
+                logger.warning("graph seed %s missing from base results; skipping", seed)
+                continue
             s = base_by_hash[seed]["score"] * weight
             if s > graph_score.get(nbr, 0.0):
                 graph_score[nbr] = s
@@ -505,6 +540,26 @@ class MemSearch:
     # Watch
     # ------------------------------------------------------------------
 
+    def _dispatch_event(self, event_type: str, file_path: Path) -> None:
+        # Serialize callbacks: N debounce Timer threads can fire at once; without
+        # this lock two threads drive run_until_complete on the same loop and the
+        # second raises "event loop is already running", silently dropping a file.
+        with self._watch_lock:
+            try:
+                if event_type == "deleted":
+                    if self._edges is not None:
+                        self._edges.delete_by_hashes(list(self._store.hashes_by_source(str(file_path))))
+                    self._store.delete_by_source(str(file_path))
+                    summary = f"Removed chunks for {file_path}"
+                else:
+                    n = self._watch_loop.run_until_complete(self.index_file(file_path))
+                    summary = f"Indexed {n} chunks from {file_path}"
+                logger.info(summary)
+                if self._watch_on_event is not None:
+                    self._watch_on_event(event_type, summary, file_path)
+            except Exception:
+                logger.exception("Failed to process %s event for %s", event_type, file_path)
+
     def watch(
         self,
         *,
@@ -530,6 +585,13 @@ class MemSearch:
             The running watcher.  Call ``watcher.stop()`` when done, or
             use it as a context manager.
 
+        Thread-safety
+        -------------
+        The watcher serializes its own callbacks (one indexing coroutine at a
+        time); ``MilvusStore`` access is not cross-thread-locked, so do not call
+        ``search()`` on the SAME instance from another thread while watching —
+        the CLI uses separate processes for watch vs. search.
+
         Example
         -------
         ::
@@ -552,29 +614,17 @@ class MemSearch:
         #   https://github.com/encode/httpx/discussions/2959
         loop = asyncio.new_event_loop()
 
-        def _on_change(event_type: str, file_path: Path) -> None:
-            try:
-                if event_type == "deleted":
-                    if self._edges is not None:
-                        self._edges.delete_by_hashes(list(self._store.hashes_by_source(str(file_path))))
-                    self._store.delete_by_source(str(file_path))
-                    summary = f"Removed chunks for {file_path}"
-                else:
-                    n = loop.run_until_complete(self.index_file(file_path))
-                    summary = f"Indexed {n} chunks from {file_path}"
-                logger.info(summary)
-                if on_event is not None:
-                    on_event(event_type, summary, file_path)
-            except Exception:
-                # Watch is a long-running daemon callback — swallow any failure
-                # (network blips, provider 500s, malformed embeddings, disk
-                # errors, etc.) so a single bad file cannot crash the watcher.
-                logger.exception("Failed to process %s event for %s", event_type, file_path)
+        # State for _dispatch_event (the FileWatcher callback). The debouncer
+        # fires each path on its own Timer thread, so callbacks can overlap;
+        # _watch_lock serializes them onto this single persistent loop.
+        self._watch_loop = loop
+        self._watch_on_event = on_event
+        self._watch_lock = threading.Lock()
 
         fw_kwargs: dict[str, Any] = {}
         if debounce_ms is not None:
             fw_kwargs["debounce_ms"] = debounce_ms
-        watcher = FileWatcher(self._paths, _on_change, **fw_kwargs)
+        watcher = FileWatcher(self._paths, self._dispatch_event, **fw_kwargs)
         watcher.start()
         return watcher
 
