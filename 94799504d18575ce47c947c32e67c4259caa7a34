@@ -1,0 +1,5 @@
+Upstream 0.4.6 (#556 / d24ebb1) integration — PORT half of a pair.
+Cherry-picked #556's `temperature` removals into compact.py & maintenance.py
+(byte-identical). The stop.sh change here is separate #563/local Windows work,
+NOT a #556 cherry-pick. Version-sync sibling commit: 5287301.
+Policy: CLAUDE.md "Version numbers track upstream *release lines* via cherry-pick."
