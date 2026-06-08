@@ -11,10 +11,45 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+
+# Failure-category taxonomy — deterministic regex classifier ported from
+# headroom (chopratejas/headroom, Apache-2.0; headroom/learn/_shared.py). Gives
+# the summarizer a stable category per failed tool result so the corrections
+# task can mine recurring failure categories. First match wins; first 2KB only.
+# Kept byte-identical to the other provider parsers so one taxonomy is mined
+# cross-provider (the patterns are apostrophe-free because the Codex/OpenClaw
+# copies live inside bash strings; here it is a plain module, but identical).
+_ERR_PATTERNS = [
+    (re.compile(r"No such file or directory|ENOENT|FileNotFoundError|File not found|does not exist", re.I), "file_not_found"),
+    (re.compile(r"ModuleNotFoundError|ImportError|No module named", re.I), "module_not_found"),
+    (re.compile(r"command not found", re.I), "command_not_found"),
+    (re.compile(r"Permission denied|Access is denied|EACCES|EPERM|auto-denied|rule which prevents", re.I), "permission_denied"),
+    (re.compile(r"file is too large|too many lines|exceeds.*limit", re.I), "file_too_large"),
+    (re.compile(r"EISDIR|Is a directory", re.I), "is_directory"),
+    (re.compile(r"SyntaxError|IndentationError", re.I), "syntax_error"),
+    (re.compile(r"Traceback \(most recent|Exception:|Error:", re.I), "runtime_error"),
+    (re.compile(r"timed? ?out|TimeoutError|deadline exceeded", re.I), "timeout"),
+    (re.compile(r"No (?:matches|files|results) found|0 matches|[Ss]kill .* not found", re.I), "no_matches"),
+    (re.compile(r"user.*reject|user.*denied|declined|didn.t want to proceed", re.I), "user_rejected"),
+    (re.compile(r"[Ss]ibling tool call errored", re.I), "sibling_error"),
+    (re.compile(r"exit code|non-zero|exited with", re.I), "exit_code"),
+    (re.compile(r"ConnectionError|ConnectionRefused|ECONNREFUSED|network", re.I), "connection_error"),
+    (re.compile(r"BUILD FAILED|compilation error|compile error", re.I), "build_failure"),
+]
+
+
+def classify_error(content: str) -> str:
+    head = content[:2000]
+    for pat, cat in _ERR_PATTERNS:
+        if pat.search(head):
+            return cat
+    return "unknown"
 
 
 @dataclass
@@ -306,6 +341,15 @@ def extract_message_text(conn: sqlite3.Connection, message_id: str) -> str:
             if status == "completed":
                 tool_input = state.get("input", {})
                 tool_output = state.get("output", "")
+                metadata = state.get("metadata", {})
+                # A failed shell command lands here as "completed" with a nonzero
+                # metadata.exit (only the bash/shell tool sets it). That is a
+                # structured signal — not a content scan — so it cannot false-
+                # positive on a successful tool whose output merely contains the
+                # word "Error". Classify the full output before truncating.
+                exit_code = metadata.get("exit") if isinstance(metadata, dict) else None
+                shell_failed = isinstance(exit_code, int) and exit_code != 0
+                full_output = tool_output if isinstance(tool_output, str) else str(tool_output)
                 if isinstance(tool_output, str) and len(tool_output) > 300:
                     tool_output = tool_output[:300] + "..."
 
@@ -318,12 +362,17 @@ def extract_message_text(conn: sqlite3.Connection, message_id: str) -> str:
                     elif "query" in tool_input:
                         input_summary = f" '{tool_input['query']}'"
 
-                tool_parts.append(
-                    f"[Tool: {tool_name}{input_summary}] {tool_output}"
-                )
+                if shell_failed:
+                    tool_parts.append(
+                        f"[Tool error: {classify_error(full_output)}] {tool_name}{input_summary} (exit {exit_code}): {tool_output}"
+                    )
+                else:
+                    tool_parts.append(
+                        f"[Tool: {tool_name}{input_summary}] {tool_output}"
+                    )
             elif status == "error":
-                error = state.get("error", "unknown error")
-                tool_parts.append(f"[Tool: {tool_name}] Error: {error}")
+                error = str(state.get("error", "unknown error"))
+                tool_parts.append(f"[Tool error: {classify_error(error)}] {tool_name}: {error}")
 
     combined = "\n".join(text_parts).strip()
     if tool_parts:

@@ -37,7 +37,7 @@ fi
 MAX_RESULT_CHARS="${MEMSEARCH_MAX_RESULT_CHARS:-1000}"
 
 python3 -c '
-import json, sys
+import json, re, sys
 
 # Force UTF-8 on stdout — Python on Windows defaults to cp1252 and crashes
 # print() the first time a non-cp1252 byte appears in formatted output. That
@@ -52,6 +52,38 @@ def truncate(text, max_chars):
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + "...(truncated)"
+
+# Failure-category taxonomy — deterministic regex classifier ported from
+# headroom (chopratejas/headroom, Apache-2.0; headroom/learn/_shared.py). Gives
+# the summarizer a stable category per failed tool result so the corrections
+# task can mine recurring failure categories. First match wins; first 2KB only.
+# Kept byte-identical to the other provider parsers so one taxonomy is mined
+# cross-provider. Patterns are apostrophe-free on purpose — this whole block
+# runs inside a single-quoted bash string, so "." stands in for any literal quote.
+_ERR_PATTERNS = [
+    (re.compile(r"No such file or directory|ENOENT|FileNotFoundError|File not found|does not exist", re.I), "file_not_found"),
+    (re.compile(r"ModuleNotFoundError|ImportError|No module named", re.I), "module_not_found"),
+    (re.compile(r"command not found", re.I), "command_not_found"),
+    (re.compile(r"Permission denied|Access is denied|EACCES|EPERM|auto-denied|rule which prevents", re.I), "permission_denied"),
+    (re.compile(r"file is too large|too many lines|exceeds.*limit", re.I), "file_too_large"),
+    (re.compile(r"EISDIR|Is a directory", re.I), "is_directory"),
+    (re.compile(r"SyntaxError|IndentationError", re.I), "syntax_error"),
+    (re.compile(r"Traceback \(most recent|Exception:|Error:", re.I), "runtime_error"),
+    (re.compile(r"timed? ?out|TimeoutError|deadline exceeded", re.I), "timeout"),
+    (re.compile(r"No (?:matches|files|results) found|0 matches|[Ss]kill .* not found", re.I), "no_matches"),
+    (re.compile(r"user.*reject|user.*denied|declined|didn.t want to proceed", re.I), "user_rejected"),
+    (re.compile(r"[Ss]ibling tool call errored", re.I), "sibling_error"),
+    (re.compile(r"exit code|non-zero|exited with", re.I), "exit_code"),
+    (re.compile(r"ConnectionError|ConnectionRefused|ECONNREFUSED|network", re.I), "connection_error"),
+    (re.compile(r"BUILD FAILED|compilation error|compile error", re.I), "build_failure"),
+]
+
+def classify_error(content):
+    head = content[:2000]
+    for pat, cat in _ERR_PATTERNS:
+        if pat.search(head):
+            return cat
+    return "unknown"
 
 def find_last_turn_start(lines):
     """Find the index of the last task_started event."""
@@ -133,9 +165,18 @@ def format_turn(lines):
                 output.append(f"[Codex calls tool]: {name}({args_summary})")
 
             elif item_type == "function_call_output":
-                result = payload.get("output", "")
-                result = truncate(str(result), MAX_RESULT_CHARS)
-                output.append(f"[Tool output]: {result}")
+                result = str(payload.get("output", ""))
+                # Codex wraps shell results with a "Process exited with code N"
+                # header — the only failure signal in the rollout. Non-shell tool
+                # outputs carry no exit marker, so they stay unlabeled (no false
+                # positives). Classify the full output, then truncate for display.
+                m = re.search(r"exited with code (\d+)", result)
+                if m and m.group(1) != "0":
+                    label = "[Tool error: " + classify_error(result) + "]"
+                else:
+                    label = "[Tool output]"
+                result = truncate(result, MAX_RESULT_CHARS)
+                output.append(f"{label}: {result}")
 
             # Skip response_item "message" — duplicates event_msg user_message/agent_message.
             # Skip: reasoning, session_meta, turn_context, web_search_call

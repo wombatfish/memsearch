@@ -159,6 +159,13 @@ def run_native_provider(ctx, prompt: str) -> str:
         stdin_prompt = "You are a maintenance task runner. Output only the requested JSON object.\n\n" + prompt
         return run_command(cmd, env=env, cwd=ctx.project_dir, timeout=120, input_text=stdin_prompt)
 
+    # DEFERRED — the codex/openclaw/opencode branches below still pass the
+    # (possibly tens-of-KB) prompt as an argv argument. On native Windows .exe
+    # providers this risks the same ~32K CreateProcess overflow (WinError 206)
+    # fixed above for claude-code via stdin. The stdin fix is NOT applied here:
+    # each CLI's headless stdin support must be verified on Windows first, since
+    # an unverified pipe could break a currently-working argv path. See memory
+    # assess-upstream-changes-windows-argv-limit.
     if ctx.platform == "codex":
         with tempfile.NamedTemporaryFile(prefix="memsearch-codex-maintenance-", suffix=".txt", delete=False) as output_file:
             output_path = Path(output_file.name)

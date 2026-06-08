@@ -51,16 +51,16 @@ def truncate(text, max_chars):
 # Patterns are apostrophe-free on purpose — this whole block runs inside a
 # single-quoted bash string, so "." stands in for any literal quote.
 _ERR_PATTERNS = [
-    (re.compile(r"No such file or directory|ENOENT|FileNotFoundError|does not exist", re.I), "file_not_found"),
+    (re.compile(r"No such file or directory|ENOENT|FileNotFoundError|File not found|does not exist", re.I), "file_not_found"),
     (re.compile(r"ModuleNotFoundError|ImportError|No module named", re.I), "module_not_found"),
     (re.compile(r"command not found", re.I), "command_not_found"),
-    (re.compile(r"Permission denied|EACCES|EPERM|auto-denied", re.I), "permission_denied"),
+    (re.compile(r"Permission denied|Access is denied|EACCES|EPERM|auto-denied|rule which prevents", re.I), "permission_denied"),
     (re.compile(r"file is too large|too many lines|exceeds.*limit", re.I), "file_too_large"),
     (re.compile(r"EISDIR|Is a directory", re.I), "is_directory"),
     (re.compile(r"SyntaxError|IndentationError", re.I), "syntax_error"),
     (re.compile(r"Traceback \(most recent|Exception:|Error:", re.I), "runtime_error"),
     (re.compile(r"timed? ?out|TimeoutError|deadline exceeded", re.I), "timeout"),
-    (re.compile(r"No (?:matches|files|results) found|0 matches", re.I), "no_matches"),
+    (re.compile(r"No (?:matches|files|results) found|0 matches|[Ss]kill .* not found", re.I), "no_matches"),
     (re.compile(r"user.*reject|user.*denied|declined|didn.t want to proceed", re.I), "user_rejected"),
     (re.compile(r"[Ss]ibling tool call errored", re.I), "sibling_error"),
     (re.compile(r"exit code|non-zero|exited with", re.I), "exit_code"),
