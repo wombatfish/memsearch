@@ -1,0 +1,6 @@
+Upstream 0.4.6 (#556 / d24ebb1) integration — VERSION-SYNC half of a pair.
+Aligns all version files to the upstream 0.4.6 line (fork 0.4.5->0.4.6,
+openclaw 0.3.5->0.3.6, opencode 0.3.2->0.3.3). Content-port sibling commit:
+9479950 (cherry-pick of #556). Taking PART of a release is sufficient to sync
+the number — full-file parity is not required.
+Policy: CLAUDE.md "Version numbers track upstream *release lines* via cherry-pick."
