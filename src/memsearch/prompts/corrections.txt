@@ -1,0 +1,60 @@
+You are maintaining a durable corrections file for {{AGENT_NAME}}.
+
+Task: {{TASK_NAME}}
+Project directory: {{PROJECT_DIR}}
+Input memory directory: {{INPUT_DIR}}
+Output file: {{OUTPUT_FILE}}
+
+You will receive the current output file and recent memory journal entries. The journals are
+third-person notes; some bullets are tagged `CORRECTION:` (the user found or fixed a mistake)
+or `GOTCHA:` (a library API, tool, or system constraint was discovered the hard way). Distill
+these into durable, reusable "do / don't" rules so the same mistake is not repeated.
+
+Mine for (memorialize only what will prevent a repeat — see the evidence bar below):
+- Bullets tagged `CORRECTION:` (user found/fixed a mistake) or `GOTCHA:` (a constraint learned the hard way).
+- User dissent — the strongest signal: the user rejected or declined a tool call ("didn't want to
+  proceed"), interrupted the agent mid-task, or stated "always/never". Capture what the agent did and
+  what the user wanted instead.
+- Environment & command rules — which runtime/CLI invocations work vs fail (e.g. "use `uv run python`,
+  not `python3`"; pwsh not bash on Windows).
+- File-structure facts — known-large files, correct paths, the right search scope, so the agent stops
+  re-reading or grepping the wrong place.
+- Repeated failure patterns — the same error category recurring (file-not-found, module-not-found,
+  permission-denied, build-failure, timeout, no-matches) that upfront knowledge would have prevented.
+- Workflow & token-waste hotspots — re-reads, wrong paths, retries, or subagent misuse that burned
+  tokens; the rule that would have avoided the loop.
+
+Rules:
+- Return only a JSON object, with no prose outside JSON.
+- Evidence bar — only memorialize a lesson with clear evidence: it recurs (2+ occurrences across the
+  journals) OR the user explicitly directed it (corrected / rejected / interrupted / stated
+  "always-never"). Drop one-off transient errors (a flaky network call, a typo fixed on the next line) —
+  they don't generalize and only add noise.
+- Use action "none" when the recent journals add no new durable correction or gotcha.
+- Use action "replace" when recent journals contain a durable correction/gotcha not already
+  represented in the existing output file, OR when existing rules need pruning (see below).
+- The "content" field, when present, must be the full replacement Markdown file.
+- Write curated, deduped rules — short, imperative, actionable. Do NOT copy raw journal lines
+  or transcript excerpts wholesale; generalize the lesson.
+- Each rule is one bullet: state the wrong behavior and the correct one ("Don't X — do Y because Z").
+- Merge near-duplicates into a single sharper rule rather than appending repeats.
+- Keep the file concise and reviewable. Prefer small targeted additions over broad rewrites
+  when the existing output is already useful.
+
+Pruning (keep the file from accumulating stale rules):
+- Re-evaluate each existing rule against the recent journals. Keep a rule while it is still
+  observed or plausibly still applies ("still-observed / last-seen"); only remove a rule when
+  the journals show it is superseded, contradicted, or tied to a since-removed tool/path.
+- Do NOT remove a still-valid rule merely because it was not triggered recently. When unsure,
+  keep it. Over-aggressive pruning is as harmful as no pruning.
+
+Suggested Markdown shape:
+- # Corrections
+- ## Do / Don't
+- ## Gotchas (library / tool / platform)
+- ## Recurring pitfalls
+
+JSON examples:
+{"action":"none","reason":"Recent journals contain no new durable correction or gotcha."}
+
+{"action":"replace","reason":"Recent journals add a CORRECTION about Windows path handling.","content":"# Corrections\n\n## Do / Don't\n- Don't ...\n"}

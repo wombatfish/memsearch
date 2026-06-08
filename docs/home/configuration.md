@@ -115,6 +115,7 @@ This is disabled by default.
 |------|----------------|---------|
 | `project_review` | `.memsearch/PROJECT.md` | Durable project state: active threads, decisions, risks, next steps |
 | `user_profile` | `.memsearch/USER.md` | Reusable user preferences, working style, recurring goals, background context |
+| `corrections` | `.memsearch/CORRECTIONS.md` | Recurring mistakes, explicit user corrections, and gotchas mined into curated, deduped, self-pruning "do/don't" rules |
 
 Example project-level setup for Codex:
 
@@ -128,6 +129,10 @@ memsearch config set plugins.codex.project_review.output_file .memsearch/PROJECT
 memsearch config set plugins.codex.user_profile.enabled true --project
 memsearch config set plugins.codex.user_profile.provider native --project
 memsearch config set plugins.codex.user_profile.output_file .memsearch/USER.md --project
+
+memsearch config set plugins.codex.corrections.enabled true --project
+memsearch config set plugins.codex.corrections.provider native --project
+memsearch config set plugins.codex.corrections.output_file .memsearch/CORRECTIONS.md --project
 ```
 
 Equivalent TOML:
@@ -153,6 +158,14 @@ model = ""
 min_interval_hours = 24
 input_dir = ".memsearch/memory"
 output_file = ".memsearch/USER.md"
+
+[plugins.codex.corrections]
+enabled = true
+provider = "native"
+model = ""
+min_interval_hours = 24
+input_dir = ".memsearch/memory"
+output_file = ".memsearch/CORRECTIONS.md"
 ```
 
 `input_dir` and `output_file` can be relative or absolute. Relative paths are
@@ -181,6 +194,7 @@ Custom maintenance prompts are configured globally or per project:
 ```bash
 memsearch config set prompts.project_review .memsearch/prompts/project-review.txt --project
 memsearch config set prompts.user_profile .memsearch/prompts/user-profile.txt --project
+memsearch config set prompts.corrections .memsearch/prompts/corrections.txt --project
 ```
 
 The plugin-installed `memory-config` skill can inspect current config, memory

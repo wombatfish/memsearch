@@ -94,14 +94,15 @@ def test_codex_native_runner_uses_profile_and_last_message(tmp_path: Path, monke
     assert captured["env"]["MEMSEARCH_IN_STOP_WORKER"] == "1"
 
 
-def test_claude_native_runner_passes_prompt_as_user_input(tmp_path: Path, monkeypatch) -> None:
+def test_claude_native_runner_passes_prompt_via_stdin(tmp_path: Path, monkeypatch) -> None:
     runner = _load_runner()
     captured = {}
 
-    def fake_run_command(cmd, *, env, cwd, timeout):
+    def fake_run_command(cmd, *, env, cwd, timeout, input_text=None):
         captured["cmd"] = cmd
         captured["env"] = env
         captured["cwd"] = cwd
+        captured["input_text"] = input_text
         return '{"action":"none","reason":"ok"}'
 
     monkeypatch.setattr(runner, "run_command", fake_run_command)
@@ -115,8 +116,14 @@ def test_claude_native_runner_passes_prompt_as_user_input(tmp_path: Path, monkey
 
     assert json.loads(result) == {"action": "none", "reason": "ok"}
     assert captured["cmd"][0:2] == ["claude", "-p"]
-    assert captured["cmd"][-1] == "maintenance prompt"
-    assert captured["cmd"][captured["cmd"].index("--system-prompt") + 1] != "maintenance prompt"
+    # Prompt is delivered on stdin, NOT argv — Windows CreateProcess caps the command
+    # line at ~32K, and the --system-prompt + stdin path is broken (#563). The system
+    # instruction is folded into the stdin prompt body, so --system-prompt is absent.
+    assert "maintenance prompt" not in captured["cmd"]
+    assert "--system-prompt" not in captured["cmd"]
+    assert captured["input_text"] is not None
+    assert captured["input_text"].endswith("maintenance prompt")
+    assert "maintenance task runner" in captured["input_text"]
     assert captured["env"]["CLAUDECODE"] == ""
 
 

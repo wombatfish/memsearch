@@ -100,12 +100,14 @@ Writing to: /home/user/.memsearch/config.toml
   Disabled by default. Configure provider/model if you enable these tasks.
   Codex project review enabled [y/N]:
   Codex user profile enabled [y/N]:
+  Codex corrections enabled [y/N]:
 
 -- Prompts --
   Leave empty to use built-in defaults.
   Summarize prompt file (for plugin session notes) []:
   Project review prompt file []:
   User profile prompt file []:
+  Corrections prompt file []:
 
 Config saved to /home/user/.memsearch/config.toml
 ```
@@ -154,8 +156,8 @@ Set plugins.codex.project_review.output_file = .memsearch/PROJECT.md in .memsear
 ```
 
 Supported plugin platforms are `claude-code`, `codex`, `opencode`, and
-`openclaw`. Supported plugin tasks are `summarize`, `project_review`, and
-`user_profile`.
+`openclaw`. Supported plugin tasks are `summarize`, `project_review`,
+`user_profile`, and `corrections`.
 
 #### `memsearch config get`
 
@@ -287,6 +289,7 @@ provider = "openai"
 | `prompts.summarize` | string | `""` | Custom prompt file for plugin session summarization |
 | `prompts.project_review` | string | `""` | Custom prompt file for plugin project maintenance |
 | `prompts.user_profile` | string | `""` | Custom prompt file for plugin user-profile maintenance |
+| `prompts.corrections` | string | `""` | Custom prompt file for plugin corrections maintenance |
 
 ---
 

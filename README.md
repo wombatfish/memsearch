@@ -261,11 +261,14 @@ memsearch config set plugins.codex.project_review.output_file .memsearch/PROJECT
 
 memsearch config set plugins.codex.user_profile.enabled true --project
 memsearch config set plugins.codex.user_profile.output_file .memsearch/USER.md --project
+
+memsearch config set plugins.codex.corrections.enabled true --project
+memsearch config set plugins.codex.corrections.output_file .memsearch/CORRECTIONS.md --project
 ```
 
-`project_review` summarizes durable project state such as active threads, decisions, risks, and next steps. `user_profile` captures reusable user preferences, working style, recurring goals, and background context. Both read `.memsearch/memory` by default; set `input_dir` if your journal files live somewhere else.
+`project_review` summarizes durable project state such as active threads, decisions, risks, and next steps. `user_profile` captures reusable user preferences, working style, recurring goals, and background context. `corrections` mines recurring mistakes, explicit user corrections, and gotchas from the daily journals into a curated, deduped, self-pruning set of durable "do/don't" rules. All three read `.memsearch/memory` by default; set `input_dir` if your journal files live somewhere else.
 
-Use `provider = "native"` to reuse the current agent's own non-interactive model path, or point the task at a named `[llm.providers.<name>]` API provider. Custom prompt files can be configured with `prompts.project_review` and `prompts.user_profile`.
+Use `provider = "native"` to reuse the current agent's own non-interactive model path, or point the task at a named `[llm.providers.<name>]` API provider. Custom prompt files can be configured with `prompts.project_review`, `prompts.user_profile`, and `prompts.corrections`.
 
 The `memory-config` skill, installed with the plugins, can inspect the current setup, explain these options, and make safe project-scoped changes from natural-language requests.
 

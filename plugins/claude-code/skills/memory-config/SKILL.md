@@ -60,6 +60,7 @@ Some plugin config fields may be missing or empty. That is usually normal:
 - Missing fields should be interpreted through `memsearch config list --resolved`, not by reading raw TOML alone.
 - New users who run `memsearch config init` may see more fields than old users because the template includes newer options.
 - Advanced maintenance is intentionally disabled by default to avoid surprise background model calls.
+- The `corrections` task is a newer maintenance task. Existing configs predate it, so the `[plugins.claude-code.corrections]` block is usually missing; the task then stays safely disabled. Enable it with `memsearch config set plugins.claude-code.corrections.enabled true --project`. A fresh `memsearch config init` now writes the block automatically.
 
 ## Configuration Logic
 
@@ -99,6 +100,14 @@ model = ""
 min_interval_hours = 24
 input_dir = ".memsearch/memory"
 output_file = ".memsearch/USER.md"
+
+[plugins.claude-code.corrections]
+enabled = false
+provider = "native"
+model = ""
+min_interval_hours = 24
+input_dir = ".memsearch/memory"
+output_file = ".memsearch/CORRECTIONS.md"
 ```
 
 Provider rules:
@@ -135,9 +144,13 @@ Model guidance:
 - For API providers, defaults are `openai -> gpt-5-mini`, `anthropic -> claude-sonnet-4-6`, and `gemini -> gemini-3-flash-preview`.
 - If quality matters more than cost for maintenance, set `plugins.claude-code.project_review.model` and `plugins.claude-code.user_profile.model` explicitly.
 
-Advanced maintenance runs after the plugin wakes it, only when enabled, journal input changed, and `min_interval_hours` elapsed. `PROJECT.md` and `USER.md` are maintenance artifacts by default and are not automatically indexed.
+Advanced maintenance runs after the plugin wakes it, only when enabled, journal input changed, and `min_interval_hours` elapsed. `PROJECT.md`, `USER.md`, and `CORRECTIONS.md` are maintenance artifacts by default and are not automatically indexed.
 
-Before enabling advanced maintenance, ask which provider to use, whether the default 24-hour interval is acceptable, and whether `.memsearch/PROJECT.md` / `.memsearch/USER.md` are acceptable output files.
+The `corrections` task mines recurring mistakes, explicit user corrections, and gotchas from the daily memory journals into a curated, deduped, self-pruning `CORRECTIONS.md` of durable "do/don't" rules. Like the other maintenance tasks it ships disabled (`enabled = false`, `provider = "native"`, `model = ""`, `min_interval_hours = 24`, `output_file = ".memsearch/CORRECTIONS.md"`); enable it with `memsearch config set plugins.claude-code.corrections.enabled true --project`.
+
+Before enabling advanced maintenance, ask which provider to use, whether the default 24-hour interval is acceptable, and whether `.memsearch/PROJECT.md` / `.memsearch/USER.md` / `.memsearch/CORRECTIONS.md` are acceptable output files.
+
+Circularity caveat for `output_file`: keep `corrections.output_file` (and the other maintenance outputs) pointed at a memsearch-managed file like `.memsearch/CORRECTIONS.md`. If a user repoints it at a file the IDE already loads into its system prompt (for example `CLAUDE.md` or `AGENTS.md`), the SessionStart context injection will duplicate that content into the agent's context — once from the IDE's own loading and again from memsearch. Pick one delivery channel, not both.
 
 Prompt overrides:
 
@@ -146,6 +159,7 @@ Prompt overrides:
 summarize = ""
 project_review = ""
 user_profile = ""
+corrections = ""
 ```
 
 Empty prompt paths mean use the built-in MemSearch prompts. Custom prompt files may use `{{AGENT_NAME}}`, `{{TASK_NAME}}`, `{{PROJECT_DIR}}`, `{{INPUT_DIR}}`, and `{{OUTPUT_FILE}}`; the runner appends existing output, recent journals, and digest automatically.

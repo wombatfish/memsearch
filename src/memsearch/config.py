@@ -124,6 +124,7 @@ class PromptsConfig:
     summarize: str = ""  # custom prompt file for plugin session summarization
     project_review: str = ""  # custom prompt file for project maintenance
     user_profile: str = ""  # custom prompt file for user profile maintenance
+    corrections: str = ""  # custom prompt file for corrections maintenance
 
 
 @dataclass
@@ -157,6 +158,9 @@ class PluginPlatformConfig:
     )
     user_profile: PluginMaintenanceTaskConfig = field(
         default_factory=lambda: PluginMaintenanceTaskConfig(output_file=".memsearch/USER.md")
+    )
+    corrections: PluginMaintenanceTaskConfig = field(
+        default_factory=lambda: PluginMaintenanceTaskConfig(output_file=".memsearch/CORRECTIONS.md")
     )
 
 
@@ -284,6 +288,7 @@ def _dict_to_plugins_config(section_data: dict[str, Any]) -> PluginsConfig:
         "summarize": PluginSummarizeConfig,
         "project_review": PluginMaintenanceTaskConfig,
         "user_profile": PluginMaintenanceTaskConfig,
+        "corrections": PluginMaintenanceTaskConfig,
     }
 
     for raw_platform, raw_platform_data in section_data.items():
@@ -444,6 +449,7 @@ def _validate_dotted_key(parts: list[str]) -> str:
             "summarize": PluginSummarizeConfig,
             "project_review": PluginMaintenanceTaskConfig,
             "user_profile": PluginMaintenanceTaskConfig,
+            "corrections": PluginMaintenanceTaskConfig,
         }
         task_cls = task_classes.get(subsection)
         if task_cls is None:

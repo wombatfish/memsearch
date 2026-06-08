@@ -85,11 +85,107 @@ def test_maintenance_replace_writes_output_and_state(tmp_path: Path) -> None:
 
     results = run_due_tasks(platform="codex", project_dir=project, cfg=cfg, llm_runner=fake_runner)
 
-    assert [r.action for r in results] == ["replace", "disabled"]
+    assert [r.action for r in results] == ["replace", "disabled", "disabled"]
     assert (project / ".memsearch" / "PROJECT.md").read_text(encoding="utf-8").startswith("# Project Memory")
     state = json.loads((project / ".memsearch" / ".maintenance-state.json").read_text(encoding="utf-8"))
     assert state["codex.project_review"]["last_action"] == "replace"
     assert state["codex.project_review"]["last_input_digest"].startswith("sha256:")
+
+
+def test_corrections_task_recognized_and_runs(tmp_path: Path) -> None:
+    """corrections must be in TASKS and recognized by config — not permanently disabled."""
+    project = tmp_path / "repo"
+    memory = project / ".memsearch" / "memory"
+    memory.mkdir(parents=True)
+    (memory / "2026-05-27.md").write_text(
+        "### 10:00\n- CORRECTION: user fixed a path bug after a wrong assumption.\n", encoding="utf-8"
+    )
+
+    cfg = MemSearchConfig()
+    cfg.plugins.codex.corrections.enabled = True
+    cfg.plugins.codex.corrections.provider = "openai"
+
+    def fake_runner(ctx, prompt: str) -> str:
+        assert ctx.task == "corrections"
+        return json.dumps(
+            {"action": "replace", "reason": "new durable rule", "content": "# Corrections\n\n- Do X, not Y."}
+        )
+
+    results = run_due_tasks(platform="codex", project_dir=project, cfg=cfg, llm_runner=fake_runner)
+
+    by_task = {r.task: r.action for r in results}
+    assert by_task.get("corrections") == "replace"
+    assert (project / ".memsearch" / "CORRECTIONS.md").read_text(encoding="utf-8").startswith("# Corrections")
+
+
+def test_resolve_task_path_memsearch_prefix_is_memsearch_relative(tmp_path: Path) -> None:
+    """In shared mode (memsearch_dir != project/.memsearch), `.memsearch/`-prefixed outputs
+    resolve memsearch_dir-relative so SessionStart reads what maintenance writes."""
+    from memsearch.maintenance import _resolve_task_path
+
+    project = tmp_path / "repo"
+    mem = tmp_path / "shared" / ".memsearch"
+    project.mkdir(parents=True)
+    mem.mkdir(parents=True)
+
+    assert _resolve_task_path(".memsearch/CORRECTIONS.md", project, mem) == (mem / "CORRECTIONS.md").resolve()
+    # existing input special-case still holds
+    assert _resolve_task_path(".memsearch/memory", project, mem) == (mem / "memory").resolve()
+    # absolute and non-.memsearch relative paths stay project-relative
+    assert _resolve_task_path("notes/OUT.md", project, mem) == (project / "notes" / "OUT.md").resolve()
+
+
+def test_atomic_write_text_writes_and_leaves_no_temp(tmp_path: Path) -> None:
+    from memsearch.maintenance import _atomic_write_text
+
+    target = tmp_path / "sub" / "CORRECTIONS.md"
+    _atomic_write_text(target, "# Corrections\n- rule\n")
+
+    assert target.read_text(encoding="utf-8") == "# Corrections\n- rule\n"
+    assert [p.name for p in target.parent.iterdir()] == ["CORRECTIONS.md"]
+
+
+def test_atomic_write_text_overwrites_existing(tmp_path: Path) -> None:
+    from memsearch.maintenance import _atomic_write_text
+
+    target = tmp_path / "f.md"
+    target.write_text("old contents", encoding="utf-8")
+    _atomic_write_text(target, "new")
+
+    assert target.read_text(encoding="utf-8") == "new"
+    assert [p.name for p in target.parent.iterdir()] == ["f.md"]
+
+
+def test_missing_prompt_template_reports_error_not_crash(tmp_path: Path, monkeypatch) -> None:
+    """A missing prompt template yields a per-task 'error' result instead of crashing the run."""
+    import memsearch.maintenance as maint
+
+    project = tmp_path / "repo"
+    memory = project / ".memsearch" / "memory"
+    memory.mkdir(parents=True)
+    (memory / "2026-05-27.md").write_text("- something happened\n", encoding="utf-8")
+
+    cfg = MemSearchConfig()
+    cfg.plugins.codex.corrections.enabled = True
+    cfg.plugins.codex.corrections.provider = "openai"
+
+    def boom(task: str, _cfg) -> str:
+        raise FileNotFoundError(f"{task}.txt")
+
+    monkeypatch.setattr(maint, "_load_prompt_template", boom)
+
+    results = run_due_tasks(
+        platform="codex",
+        project_dir=project,
+        cfg=cfg,
+        llm_runner=lambda ctx, prompt: json.dumps({"action": "none", "reason": "unreached"}),
+    )
+
+    by_task = {r.task: r.action for r in results}
+    assert by_task.get("corrections") == "error"
+    # Run completed and returned a result for every task — it did not abort.
+    assert set(by_task) == {"project_review", "user_profile", "corrections"}
+    assert not (project / ".memsearch" / "CORRECTIONS.md").exists()
 
 
 def test_maintenance_skips_unchanged_input(tmp_path: Path) -> None:

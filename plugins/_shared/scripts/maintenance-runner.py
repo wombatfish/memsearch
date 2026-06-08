@@ -26,11 +26,14 @@ DEFAULT_NATIVE_MODELS = {
 }
 
 
-def run_command(cmd: list[str], *, env: dict[str, str], cwd: Path, timeout: int) -> str:
+def run_command(cmd: list[str], *, env: dict[str, str], cwd: Path, timeout: int, input_text: str | None = None) -> str:
     result = subprocess.run(
         cmd,
+        input=input_text,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         env=env,
         cwd=str(cwd),
         timeout=timeout,
@@ -130,7 +133,7 @@ def ensure_memsearch_importable() -> None:
 def apply_plugin_prompt_defaults(cfg) -> None:
     plugin_dir = Path(__file__).resolve().parent.parent
     prompts_dir = plugin_dir / "prompts"
-    for task in ("project_review", "user_profile"):
+    for task in ("project_review", "user_profile", "corrections"):
         if getattr(cfg.prompts, task, ""):
             continue
         prompt_file = prompts_dir / f"{task}.txt"
@@ -146,13 +149,15 @@ def run_native_provider(ctx, prompt: str) -> str:
         cmd = ["claude", "-p", "--strict-mcp-config", "--no-session-persistence", "--no-chrome"]
         if model:
             cmd += ["--model", model]
-        cmd += [
-            "--system-prompt",
-            "You are a maintenance task runner. Output only the requested JSON object.",
-            prompt,
-        ]
         env["CLAUDECODE"] = ""
-        return run_command(cmd, env=env, cwd=ctx.project_dir, timeout=120)
+        # Fold the observer/system instruction into the prompt body and deliver it on
+        # STDIN — not via --system-prompt and not via argv. claude is a native Windows
+        # .exe: (1) the --system-prompt + stdin path is broken (#563), and (2) a large
+        # prompt (journals can be tens of KB) passed as an argv overflows the ~32K
+        # CreateProcess command-line limit (WinError 206) and silently fails. stdin has
+        # no length cap. Mirrors plugins/claude-code/hooks/stop.sh.
+        stdin_prompt = "You are a maintenance task runner. Output only the requested JSON object.\n\n" + prompt
+        return run_command(cmd, env=env, cwd=ctx.project_dir, timeout=120, input_text=stdin_prompt)
 
     if ctx.platform == "codex":
         with tempfile.NamedTemporaryFile(prefix="memsearch-codex-maintenance-", suffix=".txt", delete=False) as output_file:
@@ -239,7 +244,7 @@ def main() -> int:
             force=args.force,
             llm_runner=llm_runner,
         )
-    except (KeyError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+    except (KeyError, RuntimeError, ValueError, FileNotFoundError, subprocess.SubprocessError) as exc:
         sys.stderr.write(f"Maintenance error: {exc}\n")
         return 1
     finally:

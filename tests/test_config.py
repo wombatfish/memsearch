@@ -205,6 +205,30 @@ def test_plugin_maintenance_config_roundtrip(tmp_path: Path, monkeypatch: pytest
     assert saved["plugins"]["codex"]["project_review"]["min_interval_hours"] == 12
 
 
+def test_plugin_corrections_task_config_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The corrections maintenance task must be a recognized plugin task, not silently dropped."""
+    cfg_path = tmp_path / "config.toml"
+    monkeypatch.setattr("memsearch.config.GLOBAL_CONFIG_PATH", cfg_path)
+    monkeypatch.setattr("memsearch.config.PROJECT_CONFIG_PATH", tmp_path / "nope.toml")
+
+    set_config_value("plugins.claude-code.corrections.enabled", "true")
+    set_config_value("plugins.claude-code.corrections.output_file", ".memsearch/CORRECTIONS.md")
+
+    cfg = resolve_config()
+    assert cfg.plugins.claude_code.corrections.enabled is True
+    assert cfg.plugins.claude_code.corrections.output_file == ".memsearch/CORRECTIONS.md"
+
+    saved = load_config_file(cfg_path)
+    assert saved["plugins"]["claude-code"]["corrections"]["enabled"] is True
+
+
+def test_plugin_corrections_default_output_file():
+    """A fresh config exposes the corrections task with a safe default output file."""
+    cfg = MemSearchConfig()
+    assert cfg.plugins.claude_code.corrections.enabled is False
+    assert cfg.plugins.claude_code.corrections.output_file == ".memsearch/CORRECTIONS.md"
+
+
 def test_named_llm_provider_config_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Named LLM providers should round-trip through TOML and dotted config keys."""
     cfg_path = tmp_path / "config.toml"

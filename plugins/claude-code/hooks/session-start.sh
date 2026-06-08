@@ -191,35 +191,123 @@ fi
 # Always include status in systemMessage
 json_status=$(_json_encode_str "$status")
 
-# If bucket memory dir has no .md files (other than the one we just created), nothing to inject
-if [ ! -d "$MEMORY_BUCKET_DIR" ] || ! ls "$MEMORY_BUCKET_DIR"/*.md &>/dev/null; then
+# Curated artifacts written off the hot path by maintenance (memsearch_dir-relative).
+# Priority order for Option-1 cold-start injection: CORRECTIONS -> PROJECT -> USER.
+CORRECTIONS_FILE="$MEMSEARCH_DIR/CORRECTIONS.md"
+PROJECT_FILE="$MEMSEARCH_DIR/PROJECT.md"
+USER_FILE="$MEMSEARCH_DIR/USER.md"
+
+# Single predicate reused by both the guard and the injection branch selector.
+_has_artifact=false
+for _af in "$CORRECTIONS_FILE" "$PROJECT_FILE" "$USER_FILE"; do
+  [ -s "$_af" ] && { _has_artifact=true; break; }
+done
+
+# Exit early only when NEITHER any curated artifact NOR any daily log exists.
+# A freshly switched worktree may have curated artifacts but no recent daily
+# logs — the old daily-log-only guard would silently exit 0 and never inject them.
+if [ "$_has_artifact" = false ] && { [ ! -d "$MEMORY_BUCKET_DIR" ] || ! ls "$MEMORY_BUCKET_DIR"/*.md &>/dev/null; }; then
   echo "{\"systemMessage\": $json_status}"
   exit 0
 fi
 
 context=""
 
-# Find the 2 most recent daily log files within the current repo bucket.
-recent_files=$(find "$MEMORY_BUCKET_DIR" -maxdepth 1 -type f -name '*.md' -print 2>/dev/null | sort -r | head -2 || true)
+if [ "$_has_artifact" = true ]; then
+  # Option 1: inject the already-collapsed curated artifacts (higher signal-per-token
+  # than a raw daily-log tail), plus a short recent tail of today's file only.
+  # Byte caps (no token counter in bash): per-item caps clamp each item, TOTAL_MAX
+  # is the HARD ceiling. 2000*3 + 1500 = 7500 > 6000, so per-item caps alone are
+  # unenforceable — the running_total below enforces TOTAL_MAX in priority order.
+  ARTIFACT_MAX=2000
+  RECENT_TAIL_MAX=1500
+  TOTAL_MAX=6000
 
-if [ -n "$recent_files" ]; then
   context="# Recent Memory\n\n"
-  while IFS= read -r f; do
-    [ -z "$f" ] && continue
-    basename_f=$(basename "$f")
-    # Extract headings (## Session, ### turn timestamps) and bullet content —
-    # higher signal density than a raw tail of the file (skips HTML anchors and
-    # blank lines). tail -300 keeps the MOST RECENT turns — effectively the whole
-    # day, since summaries are compact (~1-2K tokens for a full day). The cap is
-    # only a runaway-day guard (the real scope bound is the 2-file `head -2`
-    # above), not a relevance filter; head -N would freeze the injected context
-    # on the morning's entries and hide everything newer (the bug that lost the
-    # 16:45 plan reference).
-    content=$(grep -E '^(#{2,4} |- )' "$f" 2>/dev/null | tail -300 || true)
-    if [ -n "$content" ]; then
-      context+="## $basename_f\n$content\n\n"
+  running_total=0
+
+  # _append_item <heading> <body> <per_item_cap>
+  # Clamp body to its per-item cap; enforce TOTAL_MAX as the hard ceiling in
+  # priority order. Returns 1 (stop) when the total budget is reached, else 0.
+  _append_item() {
+    local heading="$1" body="$2" cap="$3"
+    local orig_bytes item item_bytes was_clamped=false remaining
+    # `|| true` on every pipe-to-head/wc: a large body makes head -c exit before
+    # printf finishes, killing printf with SIGPIPE — which `set -o pipefail` +
+    # `set -e` would turn into a silent hook abort. head already wrote its bytes
+    # to the capture buffer, so the guard is behavior-preserving. Matches the
+    # `| head`/`| tail … || true` convention used elsewhere in this file.
+    orig_bytes=$(printf '%s' "$body" | wc -c || true)
+    # Clamp to per-item cap. $(...) strips trailing newlines, so measure what we hold.
+    item=$(printf '%s' "$body" | head -c "$cap" || true)
+    item_bytes=$(printf '%s' "$item" | wc -c || true)
+    [ "$orig_bytes" -gt "$cap" ] && was_clamped=true
+    remaining=$((TOTAL_MAX - running_total))
+    if [ "$remaining" -le 0 ]; then
+      return 1
     fi
-  done <<< "$recent_files"
+    if [ "$item_bytes" -gt "$remaining" ]; then
+      item=$(printf '%s' "$item" | head -c "$remaining" || true)
+      context+="## $heading\n$item\n[truncated]\n\n"
+      return 1
+    fi
+    if [ "$was_clamped" = true ]; then
+      context+="## $heading\n$item\n[truncated]\n\n"
+    else
+      context+="## $heading\n$item\n\n"
+    fi
+    running_total=$((running_total + item_bytes))
+    return 0
+  }
+
+  # Priority order: CORRECTIONS -> PROJECT -> USER -> recent-tail.
+  # Stop appending lower-priority items once the total budget is reached.
+  _done=false
+  for _spec in "CORRECTIONS.md:$CORRECTIONS_FILE" "PROJECT.md:$PROJECT_FILE" "USER.md:$USER_FILE"; do
+    _heading="${_spec%%:*}"
+    _file="${_spec#*:}"
+    [ -s "$_file" ] || continue
+    _body=$(cat "$_file" 2>/dev/null || true)
+    [ -z "$_body" ] && continue
+    if ! _append_item "$_heading" "$_body" "$ARTIFACT_MAX"; then
+      _done=true
+      break
+    fi
+  done
+
+  # Recent tail: today's file only, so "what just happened" survives the
+  # 24h-gated curated cadence. Heading mirrors the existing "## <basename>.md" style.
+  if [ "$_done" = false ]; then
+    _today="$MEMORY_BUCKET_DIR/$(date +%Y-%m-%d).md"
+    _tail=$(grep -E '^(#{2,4} |- )' "$_today" 2>/dev/null || true)
+    if [ -n "$_tail" ]; then
+      _append_item "$(date +%Y-%m-%d).md" "$_tail" "$RECENT_TAIL_MAX" || true
+    fi
+  fi
+else
+  # Fallback (maintenance off / zero-config): the existing behavior unchanged.
+  # Find the 2 most recent daily log files within the current repo bucket.
+  recent_files=$(find "$MEMORY_BUCKET_DIR" -maxdepth 1 -type f -name '*.md' -print 2>/dev/null | sort -r | head -2 || true)
+
+  if [ -n "$recent_files" ]; then
+    context="# Recent Memory\n\n"
+    while IFS= read -r f; do
+      [ -z "$f" ] && continue
+      basename_f=$(basename "$f")
+      # Extract headings (## Session, ### turn timestamps) and bullet content —
+      # higher signal density than a raw tail of the file (skips HTML anchors and
+      # blank lines). tail -300 keeps the MOST RECENT turns — effectively the whole
+      # day, since summaries are compact (~1-2K tokens for a full day). The cap is
+      # only a runaway-day guard (the real scope bound is the 2-file `head -2`
+      # above), not a relevance filter; head -N would freeze the injected context
+      # on the morning's entries and hide everything newer (the bug that lost the
+      # 16:45 plan reference).
+      content=$(grep -E '^(#{2,4} |- )' "$f" 2>/dev/null | tail -300 || true)
+      if [ -n "$content" ]; then
+        context+="## $basename_f\n$content\n\n"
+      fi
+    done <<< "$recent_files"
+  fi
 fi
 
 # Note: Detailed memory search is handled by the memory-recall skill (pull-based).

@@ -9,6 +9,8 @@ import os
 import re
 import shlex
 import subprocess
+import tempfile
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -25,7 +27,7 @@ from .config import (
     resolve_env_ref,
 )
 
-TASKS = ("project_review", "user_profile")
+TASKS = ("project_review", "user_profile", "corrections")
 MAX_PROMPT_CHARS = 80_000  # backstop only; per-section budgets keep the normal load well under this
 EXISTING_OUTPUT_BUDGET = 20_000
 JOURNAL_TOTAL_BUDGET = 46_000  # leaves headroom even when existing output is also at its budget
@@ -130,36 +132,50 @@ def run_due_tasks(
                 output_file=output_file,
                 input_digest=digest,
             )
-            prompt = _build_prompt(ctx, cfg)
-            raw = llm_runner(ctx, prompt) if llm_runner else run_task_llm(ctx, prompt, cfg)
-            parsed = _parse_task_response(raw)
-            now = _now()
+            try:
+                prompt = _build_prompt(ctx, cfg)
+                raw = llm_runner(ctx, prompt) if llm_runner else run_task_llm(ctx, prompt, cfg)
+                parsed = _parse_task_response(raw)
+                now = _now()
 
-            if parsed["action"] == "replace":
-                content = str(parsed.get("content") or "").strip()
-                if not content:
-                    raise RuntimeError(f"{task_name} returned replace without content")
-                output_file.write_text(content.rstrip() + "\n", encoding="utf-8")
-                action = "replace"
-            else:
-                action = "none"
+                if parsed["action"] == "replace":
+                    content = str(parsed.get("content") or "").strip()
+                    if not content:
+                        raise RuntimeError(f"{task_name} returned replace without content")
+                    _atomic_write_text(output_file, content.rstrip() + "\n")
+                    action = "replace"
+                else:
+                    action = "none"
 
-            state[state_key] = {
-                "last_checked_at": now,
-                "last_success_at": now,
-                "last_input_digest": digest,
-                "last_action": action,
-                "output_file": str(output_file),
-            }
-            _save_state(state_path, state)
-            results.append(
-                MaintenanceResult(
-                    task=task_name,
-                    action=action,
-                    reason=str(parsed.get("reason") or ""),
-                    output_file=str(output_file),
+                state[state_key] = {
+                    "last_checked_at": now,
+                    "last_success_at": now,
+                    "last_input_digest": digest,
+                    "last_action": action,
+                    "output_file": str(output_file),
+                }
+                _save_state(state_path, state)
+                results.append(
+                    MaintenanceResult(
+                        task=task_name,
+                        action=action,
+                        reason=str(parsed.get("reason") or ""),
+                        output_file=str(output_file),
+                    )
                 )
-            )
+            except FileNotFoundError as exc:
+                # Typically a missing prompt template (core package resource absent, or a
+                # misconfigured prompts.<task> path); on Windows a FileNotFoundError can
+                # also surface from the LLM subprocess (e.g. WinError 206). Either way it
+                # must not crash the whole run or abort sibling tasks — report it as a
+                # per-task error result and keep the exception text for diagnosis.
+                results.append(
+                    MaintenanceResult(
+                        task=task_name,
+                        action="error",
+                        reason=f"{task_name} failed: {exc}",
+                    )
+                )
 
     return results
 
@@ -179,8 +195,12 @@ def _get_task_config(cfg: MemSearchConfig, platform: str, task_name: str) -> Plu
 
 def _resolve_task_path(raw_path: str, project_dir: Path, memsearch_dir: Path) -> Path:
     path_text = raw_path or ""
-    if path_text == ".memsearch/memory":
-        return (memsearch_dir / "memory").resolve()
+    # `.memsearch/...` paths resolve memsearch_dir-relative so maintenance writes and the
+    # lock-free SessionStart reads agree in BOTH default mode (memsearch_dir ==
+    # project_dir/.memsearch) and explicit shared-MEMSEARCH_DIR mode. Subsumes the old
+    # exact ".memsearch/memory" input special-case.
+    if path_text.startswith(".memsearch/"):
+        return (memsearch_dir / path_text[len(".memsearch/") :]).resolve()
     path = Path(path_text).expanduser()
     if not path.is_absolute():
         path = project_dir / path
@@ -597,8 +617,39 @@ def _load_state(path: Path) -> dict[str, Any]:
     return {}
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write *text* to *path* atomically: temp file in the same directory + ``os.replace``.
+
+    A concurrent reader (e.g. SessionStart injecting curated files lock-free) sees either the
+    complete old file or the complete new file — never a partial write. ``os.replace`` is
+    atomic on POSIX and Windows. On Windows, if a reader holds the destination open the
+    replace can raise ``PermissionError``; a short bounded retry recovers (the *write*
+    retries) rather than exposing a torn read. The temp file is created on the same
+    filesystem (``path.parent``) so the replace is a rename, not a copy.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        for attempt in range(5):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.05)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
 def _save_state(path: Path, state: dict[str, Any]) -> None:
-    path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
 
 
 def _pid_alive(pid: int) -> bool:

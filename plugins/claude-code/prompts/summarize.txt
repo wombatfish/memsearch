@@ -11,4 +11,5 @@ Rules:
 - Be specific: mention file names, function names, tool names, and concrete outcomes
 - Do NOT answer the human's question yourself — just note what was discussed
 - Do NOT add any text before or after the bullet points
+- When applicable, make ONE of the bullets a tagged rule: prefix it 'CORRECTION:' if the user found or fixed a mistake (theirs or {{AGENT_NAME}}'s), or 'GOTCHA:' if a library API, tool, or system constraint was discovered the hard way. At most ONE such tag per summary. The tagged bullet still counts toward the 2-6 total — do NOT add any bullet or text beyond the 2-6
 - Write in the same language as the human's message in the transcript

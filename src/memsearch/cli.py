@@ -1132,10 +1132,10 @@ def config_init(project: bool) -> None:
     click.echo("\n── Plugin summarize routing ──")
     click.echo("  Leave provider empty/native to keep each plugin's current native summarizer.")
     result["plugins"] = {
-        "claude-code": {"summarize": {}, "project_review": {}, "user_profile": {}},
-        "codex": {"summarize": {}, "project_review": {}, "user_profile": {}},
-        "opencode": {"summarize": {}, "project_review": {}, "user_profile": {}},
-        "openclaw": {"summarize": {}, "project_review": {}, "user_profile": {}},
+        "claude-code": {"summarize": {}, "project_review": {}, "user_profile": {}, "corrections": {}},
+        "codex": {"summarize": {}, "project_review": {}, "user_profile": {}, "corrections": {}},
+        "opencode": {"summarize": {}, "project_review": {}, "user_profile": {}, "corrections": {}},
+        "openclaw": {"summarize": {}, "project_review": {}, "user_profile": {}, "corrections": {}},
     }
     result["plugins"]["claude-code"]["summarize"]["enabled"] = click.confirm(
         "  Claude Code automatic summaries enabled",
@@ -1194,7 +1194,11 @@ def config_init(project: bool) -> None:
         ("opencode", "OpenCode", current.plugins.opencode),
         ("openclaw", "OpenClaw", current.plugins.openclaw),
     ]:
-        for task_name, task_label in [("project_review", "project review"), ("user_profile", "user profile")]:
+        for task_name, task_label in [
+            ("project_review", "project review"),
+            ("user_profile", "user profile"),
+            ("corrections", "corrections"),
+        ]:
             task = getattr(current_platform, task_name)
             section = result["plugins"][key][task_name]
             section["enabled"] = click.confirm(f"  {label} {task_label} enabled", default=task.enabled)

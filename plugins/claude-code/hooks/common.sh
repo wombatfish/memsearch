@@ -138,7 +138,10 @@ _json_encode_str() {
   if command -v jq &>/dev/null; then
     printf '%s' "$str" | jq -Rs . 2>/dev/null && return 0
   fi
-  printf '%s' "$str" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))" 2>/dev/null && return 0
+  # Read raw bytes and decode with errors="replace": curated artifacts are byte-clamped
+  # (head -c) before injection, which can cut mid-multibyte UTF-8; sys.stdin.read() would
+  # raise UnicodeDecodeError and drop us into the unescaped last-resort below (broken JSON).
+  printf '%s' "$str" | python3 -c "import json,sys; print(json.dumps(sys.stdin.buffer.read().decode('utf-8','replace')))" 2>/dev/null && return 0
   # Last resort: simple quoting (no special char escaping)
   printf '"%s"' "$str"
   return 0
