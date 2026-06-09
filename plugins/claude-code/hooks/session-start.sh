@@ -285,9 +285,15 @@ if [ "$_has_artifact" = true ]; then
     fi
   fi
 else
-  # Fallback (maintenance off / zero-config): the existing behavior unchanged.
+  # Fallback (maintenance off / zero-config).
   # Find the 2 most recent daily log files within the current repo bucket.
-  recent_files=$(find "$MEMORY_BUCKET_DIR" -maxdepth 1 -type f -name '*.md' -print 2>/dev/null | sort -r | head -2 || true)
+  # Match ONLY the dated YYYY-MM-DD.md pattern: a lexical `sort -r` over a bare
+  # `*.md` lets any letter-prefixed non-dated file (e.g. a hand-authored
+  # lessons-*.md) outrank every dated log in ASCII order and consume both
+  # `head -2` slots, silently evicting the newest daily log. Restricting the
+  # glob keeps the selector chronological and clutter-proof. `-name` takes an
+  # fnmatch pattern (not a path), so the brackets are MSYS-safe on Windows.
+  recent_files=$(find "$MEMORY_BUCKET_DIR" -maxdepth 1 -type f -name '2[0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].md' -print 2>/dev/null | sort -r | head -2 || true)
 
   if [ -n "$recent_files" ]; then
     context="# Recent Memory\n\n"
