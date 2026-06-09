@@ -223,7 +223,7 @@ if [ "$_has_artifact" = true ]; then
   RECENT_TAIL_MAX=1500
   TOTAL_MAX=6000
 
-  context="# Recent Memory\n\n"
+  context=$'# Recent Memory\n\n'
   running_total=0
 
   # _append_item <heading> <body> <per_item_cap>
@@ -248,13 +248,13 @@ if [ "$_has_artifact" = true ]; then
     fi
     if [ "$item_bytes" -gt "$remaining" ]; then
       item=$(printf '%s' "$item" | head -c "$remaining" || true)
-      context+="## $heading\n$item\n[truncated]\n\n"
+      context+="## $heading"$'\n'"$item"$'\n[truncated]\n\n'
       return 1
     fi
     if [ "$was_clamped" = true ]; then
-      context+="## $heading\n$item\n[truncated]\n\n"
+      context+="## $heading"$'\n'"$item"$'\n[truncated]\n\n'
     else
-      context+="## $heading\n$item\n\n"
+      context+="## $heading"$'\n'"$item"$'\n\n'
     fi
     running_total=$((running_total + item_bytes))
     return 0
@@ -276,12 +276,12 @@ if [ "$_has_artifact" = true ]; then
   done
 
   # Recent tail: today's file only, so "what just happened" survives the
-  # 24h-gated curated cadence. Heading mirrors the existing "## <basename>.md" style.
+  # 24h-gated curated cadence. Heading is the bare ISO date (## YYYY-MM-DD).
   if [ "$_done" = false ]; then
     _today="$MEMORY_BUCKET_DIR/$(date +%Y-%m-%d).md"
     _tail=$(grep -E '^(#{2,4} |- )' "$_today" 2>/dev/null || true)
     if [ -n "$_tail" ]; then
-      _append_item "$(date +%Y-%m-%d).md" "$_tail" "$RECENT_TAIL_MAX" || true
+      _append_item "$(date +%Y-%m-%d)" "$_tail" "$RECENT_TAIL_MAX" || true
     fi
   fi
 else
@@ -293,10 +293,13 @@ else
   # `head -2` slots, silently evicting the newest daily log. Restricting the
   # glob keeps the selector chronological and clutter-proof. `-name` takes an
   # fnmatch pattern (not a path), so the brackets are MSYS-safe on Windows.
-  recent_files=$(find "$MEMORY_BUCKET_DIR" -maxdepth 1 -type f -name '2[0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].md' -print 2>/dev/null | sort -r | head -2 || true)
+  # `sort -r | head -2` picks the two newest; the trailing `sort` re-orders that
+  # pair oldest-first so the dump reads chronologically (earlier day prepended)
+  # and the most recent day lands at the bottom, nearest the live prompt.
+  recent_files=$(find "$MEMORY_BUCKET_DIR" -maxdepth 1 -type f -name '2[0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].md' -print 2>/dev/null | sort -r | head -2 | sort || true)
 
   if [ -n "$recent_files" ]; then
-    context="# Recent Memory\n\n"
+    context=$'# Recent Memory\n\n'
     while IFS= read -r f; do
       [ -z "$f" ] && continue
       basename_f=$(basename "$f")
@@ -310,7 +313,7 @@ else
       # 16:45 plan reference).
       content=$(grep -E '^(#{2,4} |- )' "$f" 2>/dev/null | tail -300 || true)
       if [ -n "$content" ]; then
-        context+="## $basename_f\n$content\n\n"
+        context+="## ${basename_f%.md}"$'\n'"$content"$'\n\n'
       fi
     done <<< "$recent_files"
   fi
