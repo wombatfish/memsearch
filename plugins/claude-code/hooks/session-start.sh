@@ -263,7 +263,7 @@ if [ "$_has_artifact" = true ]; then
   # Priority order: CORRECTIONS -> PROJECT -> USER -> recent-tail.
   # Stop appending lower-priority items once the total budget is reached.
   _done=false
-  for _spec in "CORRECTIONS.md:$CORRECTIONS_FILE" "PROJECT.md:$PROJECT_FILE" "USER.md:$USER_FILE"; do
+  for _spec in "CORRECTIONS:$CORRECTIONS_FILE" "PROJECT:$PROJECT_FILE" "USER:$USER_FILE"; do
     _heading="${_spec%%:*}"
     _file="${_spec#*:}"
     [ -s "$_file" ] || continue
