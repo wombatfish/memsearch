@@ -25,6 +25,34 @@ else
   esac
 fi
 
+# Canonicalize to the forward-slash Windows form with an UPPERCASE drive
+# letter (e.g. D:/Projects/foo) before hashing — the form that
+# `git rev-parse --show-toplevel` emits and that existing collections were
+# hashed from. Without this, the same directory in MSYS form (/d/x),
+# backslash form (D:\x), or lowercase-drive form (d:/x) hashes to a
+# different collection than the hooks use. POSIX paths on real POSIX systems
+# pass through unchanged (rewrites only apply on msys/cygwin or when a
+# drive-letter pattern matches).
+if command -v cygpath &>/dev/null; then
+  PROJECT_DIR="$(cygpath -m "$PROJECT_DIR" 2>/dev/null || printf '%s' "$PROJECT_DIR")"
+else
+  case "$OSTYPE" in
+    msys*|cygwin*)
+      PROJECT_DIR="${PROJECT_DIR//\\//}"
+      case "$PROJECT_DIR" in
+        /[A-Za-z]/*)  # MSYS /d/... → D:/...
+          PROJECT_DIR="$(printf '%s' "${PROJECT_DIR:1:1}" | tr '[:lower:]' '[:upper:]'):${PROJECT_DIR:2}"
+          ;;
+      esac
+      ;;
+  esac
+fi
+case "$PROJECT_DIR" in
+  [a-z]:/*|[a-z]:\\*)  # lowercase drive → uppercase (never matches a POSIX path)
+    PROJECT_DIR="$(printf '%s' "${PROJECT_DIR:0:1}" | tr '[:lower:]' '[:upper:]')${PROJECT_DIR:1}"
+    ;;
+esac
+
 # Extract basename and sanitize:
 # - lowercase
 # - replace non-alphanumeric with underscore
@@ -44,7 +72,7 @@ if command -v sha256sum &>/dev/null; then
 elif command -v shasum &>/dev/null; then
   hash=$(printf '%s' "$PROJECT_DIR" | shasum -a 256 | cut -c1-8)
 else
-  hash=$(python3 -c "import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:8])" "$PROJECT_DIR")
+  hash=$("${MEMSEARCH_PYTHON:-python3}" -c "import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:8])" "$PROJECT_DIR")
 fi
 
 echo "ms_${sanitized}_${hash}"

@@ -74,8 +74,11 @@ NOW=$(date +%H:%M)
 MEMORY_FILE="$MEMORY_BUCKET_DIR/$TODAY.md"
 
 # Extract session ID and last user turn UUID for progressive disclosure anchors
-SESSION_ID=$(basename "$TRANSCRIPT_PATH" .jsonl)
-LAST_USER_TURN_UUID=$(python3 -c "
+# Normalize separators first: a backslash Windows path would make GNU basename
+# (which splits only on /) return the whole path — yielding an illegal NTFS
+# sidecar filename and a path-keyed session-dedup anchor.
+SESSION_ID=$(basename "${TRANSCRIPT_PATH//\\//}" .jsonl)
+LAST_USER_TURN_UUID=$("${MEMSEARCH_PYTHON:-python3}" -c "
 import json, sys
 uuid = ''
 with open(sys.argv[1], encoding='utf-8', errors='replace') as f:
@@ -97,20 +100,6 @@ with open(sys.argv[1], encoding='utf-8', errors='replace') as f:
 print(uuid)
 " "$TRANSCRIPT_PATH" 2>/dev/null || true)
 
-# Load summarization prompt: user custom (via config) > plugin built-in template
-AGENT_NAME="Claude Code"
-PROMPT_FILE=""
-if [ -n "$MEMSEARCH_CMD" ]; then
-  PROMPT_FILE=$($MEMSEARCH_CMD config get prompts.summarize 2>/dev/null || true)
-fi
-if [ -n "$PROMPT_FILE" ] && [ -f "$PROMPT_FILE" ]; then
-  SYSTEM_PROMPT=$(sed "s/{{AGENT_NAME}}/$AGENT_NAME/g" "$PROMPT_FILE")
-elif [ -f "${CLAUDE_PLUGIN_ROOT}/prompts/summarize.txt" ]; then
-  SYSTEM_PROMPT=$(sed "s/{{AGENT_NAME}}/$AGENT_NAME/g" "${CLAUDE_PLUGIN_ROOT}/prompts/summarize.txt")
-else
-  SYSTEM_PROMPT="You are a third-person note-taker. Summarize the transcript as 2-6 bullet points. Write in third person. Output ONLY bullet points."
-fi
-
 # --- Crash-safety sidecar (persist-then-upgrade, phase 1) ---
 # This Stop hook is async and writes the polished summary only AFTER the slow,
 # killable `claude -p` below. If teardown kills the hook mid-summarize (e.g. the
@@ -130,6 +119,22 @@ SIDECAR="$PENDING_DIR/$WRITE_TOKEN"
   echo "$ENTRY_ANCHOR"
   echo "$PARSED"
 } > "$SIDECAR" 2>/dev/null || true
+
+# Load summarization prompt: user custom (via config) > plugin built-in template.
+# Deliberately AFTER the sidecar write: every `memsearch config get` spawn is a
+# kill window, and the raw turn must already be durable before we enter it.
+AGENT_NAME="Claude Code"
+PROMPT_FILE=""
+if [ -n "$MEMSEARCH_CMD" ]; then
+  PROMPT_FILE=$($MEMSEARCH_CMD config get prompts.summarize 2>/dev/null || true)
+fi
+if [ -n "$PROMPT_FILE" ] && [ -f "$PROMPT_FILE" ]; then
+  SYSTEM_PROMPT=$(sed "s/{{AGENT_NAME}}/$AGENT_NAME/g" "$PROMPT_FILE")
+elif [ -f "${CLAUDE_PLUGIN_ROOT}/prompts/summarize.txt" ]; then
+  SYSTEM_PROMPT=$(sed "s/{{AGENT_NAME}}/$AGENT_NAME/g" "${CLAUDE_PLUGIN_ROOT}/prompts/summarize.txt")
+else
+  SYSTEM_PROMPT="You are a third-person note-taker. Summarize the transcript as 2-6 bullet points. Write in third person. Output ONLY bullet points."
+fi
 
 # Summarize the last turn into structured bullet points.
 # Default: use claude -p with the plugin default model. A plugin-specific

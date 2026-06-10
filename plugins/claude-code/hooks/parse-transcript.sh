@@ -28,7 +28,24 @@ fi
 
 MAX_RESULT_CHARS="${MEMSEARCH_MAX_RESULT_CHARS:-1000}"
 
-python3 -c '
+# Working interpreter: prefer $MEMSEARCH_PYTHON (exported by common.sh); when
+# run standalone, resolve by executing candidates — `command -v python3`
+# succeeds on the WindowsApps alias stub that fails at runtime.
+PYTHON="${MEMSEARCH_PYTHON:-}"
+if [ -z "$PYTHON" ]; then
+  for _py in python3 python; do
+    if "$_py" -c pass >/dev/null 2>&1; then
+      PYTHON="$_py"
+      break
+    fi
+  done
+fi
+if [ -z "$PYTHON" ]; then
+  echo "ERROR: no working python interpreter found" >&2
+  exit 1
+fi
+
+"$PYTHON" -c '
 import json, sys, re
 
 # Force UTF-8 on stdin/stdout — Python on Windows uses cp1252 by default, which

@@ -27,7 +27,7 @@ Search for memories relevant to: $ARGUMENTS
 3. **Expand**: For each relevant result, run `memsearch expand <chunk_hash> --collection <collection name above>` to get the full markdown section with surrounding context.
 
 4. **Deep drill (optional)**: If an expanded chunk contains transcript anchors (HTML comments with session/transcript info), and the original conversation seems critical:
-   - Run `python3 ${CLAUDE_PLUGIN_ROOT}/transcript.py <jsonl_path> --turn <uuid> --context 3` to retrieve the original conversation turns.
+   - Run `python3 "${CLAUDE_PLUGIN_ROOT}/transcript.py" <jsonl_path> --turn <uuid> --context 3` to retrieve the original conversation turns. If `python3` is missing or fails at runtime (the Windows store stub passes `command -v` but exits with "Python was not found"), rerun with `python` instead — or use `$MEMSEARCH_PYTHON` if set in the environment.
    - If the anchor format is unfamiliar (e.g. `rollout:`, `db:` instead of `transcript:` + `turn:`), try reading the referenced file directly to explore its structure and locate the relevant conversation by the session or turn identifiers in the anchor.
 
 5. **Return results**: Output a curated summary of the most relevant memories. Be concise — only include information that is genuinely useful for the user's current question.

@@ -18,6 +18,19 @@ for p in "$HOME/.local/bin" "$HOME/.cargo/bin" "$HOME/bin" "/usr/local/bin"; do
   [[ -d "$p" ]] && [[ ":$PATH:" != *":$p:"* ]] && export PATH="$p:$PATH"
 done
 
+# Resolve a working Python interpreter ONCE. `command -v python3` succeeds on
+# the Windows WindowsApps alias stub that prints "Python was not found" and
+# exits non-zero at runtime — so actually execute each candidate and keep the
+# first that runs. Exported so child scripts (parse-transcript.sh) reuse it.
+MEMSEARCH_PYTHON=""
+for _py in python3 python; do
+  if "$_py" -c pass >/dev/null 2>&1; then
+    MEMSEARCH_PYTHON="$_py"
+    break
+  fi
+done
+export MEMSEARCH_PYTHON
+
 # Memory directory and memsearch state directory are project-scoped.
 # Prefer git root to avoid .memsearch scattered in subdirectories when
 # CLAUDE_PROJECT_DIR is unset (child claude -p) or points to a subdir.
@@ -104,8 +117,8 @@ _json_val() {
   if command -v jq &>/dev/null; then
     # Build jq filter from dotted key: "info.version" → ".info.version"
     result=$(printf '%s' "$json" | jq -r ".${key} // empty" 2>/dev/null) || true
-  else
-    result=$(python3 -c "
+  elif [ -n "$MEMSEARCH_PYTHON" ]; then
+    result=$("$MEMSEARCH_PYTHON" -c "
 import json, sys
 try:
     obj = json.loads(sys.argv[1])
@@ -141,7 +154,9 @@ _json_encode_str() {
   # Read raw bytes and decode with errors="replace": curated artifacts are byte-clamped
   # (head -c) before injection, which can cut mid-multibyte UTF-8; sys.stdin.read() would
   # raise UnicodeDecodeError and drop us into the unescaped last-resort below (broken JSON).
-  printf '%s' "$str" | python3 -c "import json,sys; print(json.dumps(sys.stdin.buffer.read().decode('utf-8','replace')))" 2>/dev/null && return 0
+  if [ -n "$MEMSEARCH_PYTHON" ]; then
+    printf '%s' "$str" | "$MEMSEARCH_PYTHON" -c "import json,sys; print(json.dumps(sys.stdin.buffer.read().decode('utf-8','replace')))" 2>/dev/null && return 0
+  fi
   # Last resort: simple quoting (no special char escaping)
   printf '"%s"' "$str"
   return 0
@@ -165,8 +180,8 @@ run_memsearch() {
 }
 
 run_maintenance() {
-  if command -v python3 >/dev/null 2>&1; then
-    MEMSEARCH_NO_WATCH=1 python3 "$SCRIPT_DIR/../scripts/maintenance-runner.py" \
+  if [ -n "$MEMSEARCH_PYTHON" ]; then
+    MEMSEARCH_NO_WATCH=1 "$MEMSEARCH_PYTHON" "$SCRIPT_DIR/../scripts/maintenance-runner.py" \
       --platform claude-code \
       --project-dir "$_PROJECT_DIR" \
       --memsearch-dir "$MEMSEARCH_DIR" \
@@ -219,6 +234,11 @@ stop_watch() {
   if [ "${MEMSEARCH_NO_WATCH:-}" = "1" ]; then
     return 0
   fi
+  # 0. Cross-platform stop: the CLI terminates the incumbent watcher via the
+  # watchlock takeover (exits 0 when none). This is the only path that works
+  # for native memsearch.exe on Windows — the pidfile/pgrep steps below are
+  # POSIX-only best-effort, kept for Lite/POSIX setups.
+  run_memsearch watch --stop || true
   # 1. Kill the process recorded in pidfile
   if [ -f "$WATCH_PIDFILE" ]; then
     local pid

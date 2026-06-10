@@ -10,16 +10,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec < /dev/null
 source "$SCRIPT_DIR/common.sh"
 
-# Bootstrap: if memsearch not available, install uv and warm up uvx cache
+# Bootstrap: if memsearch not available, install uv and warm up uvx cache.
+# Auto-executing the remote install script is opt-in (MEMSEARCH_BOOTSTRAP_INSTALL=1);
+# otherwise the status line below surfaces "memsearch not found" guidance.
 if [ -z "$MEMSEARCH_CMD" ]; then
-  if ! command -v uvx &>/dev/null; then
+  if ! command -v uvx &>/dev/null && [ "${MEMSEARCH_BOOTSTRAP_INSTALL:-}" = "1" ]; then
     curl -LsSf https://astral.sh/uv/install.sh | sh 2>/dev/null
     export PATH="$HOME/.local/bin:$PATH"
   fi
-  # Warm up uvx cache with --upgrade to pull latest version
-  # First run downloads packages (~2s); subsequent runs use cache (<0.3s)
-  uvx --upgrade --from 'memsearch[onnx]' memsearch --version &>/dev/null || true
-  _detect_memsearch
+  if command -v uvx &>/dev/null; then
+    # Warm up uvx cache with --upgrade to pull latest version
+    # First run downloads packages (~2s); subsequent runs use cache (<0.3s)
+    uvx --upgrade --from 'memsearch[onnx]' memsearch --version &>/dev/null || true
+    _detect_memsearch
+  fi
 fi
 
 # First-time setup: if no config file exists, default to onnx provider.
@@ -70,9 +74,10 @@ if [ -n "$REQUIRED_KEY" ] && [ -z "${!REQUIRED_KEY:-}" ]; then
   fi
 fi
 
-# Check PyPI for newer version (2s timeout, non-blocking on failure)
+# Check PyPI for newer version (2s timeout, non-blocking on failure).
+# MEMSEARCH_NO_UPDATE_CHECK=1 skips it entirely (e.g. fork builds, offline).
 UPDATE_HINT=""
-if [ -n "$VERSION" ]; then
+if [ -n "$VERSION" ] && [ "${MEMSEARCH_NO_UPDATE_CHECK:-}" != "1" ]; then
   _PYPI_JSON=$(curl -s --max-time 2 https://pypi.org/pypi/memsearch/json 2>/dev/null || true)
   LATEST=$(_json_val "$_PYPI_JSON" "info.version" "")
   if [ -n "$LATEST" ] && [ "$LATEST" != "$VERSION" ]; then
@@ -83,7 +88,7 @@ if [ -n "$VERSION" ]; then
     else
       UPGRADE_CMD="pip install --upgrade 'memsearch[onnx]'"
     fi
-    UPDATE_HINT=" | UPDATE: v${LATEST} available — run: ${UPGRADE_CMD}"
+    UPDATE_HINT=" | UPDATE: v${LATEST} available — run: ${UPGRADE_CMD} (pulls upstream PyPI; fork installs should update from their local checkout instead)"
   fi
 fi
 
@@ -103,6 +108,9 @@ status="[memsearch${VERSION_TAG}] embedding: ${PROVIDER}/${MODEL:-unknown} | mil
 if [ "$KEY_MISSING" = true ]; then
   status+=" | ERROR: ${REQUIRED_KEY} not set — memory search disabled"
   status+=" | Tip: switch to free local embedding: memsearch config set embedding.provider onnx && memsearch index --force"
+fi
+if [ -z "$MEMSEARCH_CMD" ]; then
+  status+=" | ERROR: memsearch not found — install: uv tool install 'memsearch[onnx]' (or set MEMSEARCH_BOOTSTRAP_INSTALL=1 to auto-install uv)"
 fi
 
 # Build collection description: "<project_basename> | <provider>/<model>"
@@ -172,7 +180,13 @@ start_watch
 # a hung prior index cross-platform (retires the old .index.pid kill). The
 # milvus_lite GC first frees any stale .db lock left by a force-killed run.
 # If embedding dimension changed (e.g. user switched provider), auto-reset and re-index.
-if [[ "$MILVUS_URI" != http* ]] && [[ "$MILVUS_URI" != tcp* ]]; then
+if [ -z "$MILVUS_URI" ] && [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
+  # Empty/unreadable milvus.uri on Windows means "server unknown", NOT Lite:
+  # milvus-lite is unavailable on Windows, so the Lite-mode background index
+  # below would be doomed. Skip it and surface the problem instead of
+  # silently disabling indexing for the session.
+  status+=" | WARNING: milvus.uri unreadable — indexing skipped this session"
+elif [[ "$MILVUS_URI" != http* ]] && [[ "$MILVUS_URI" != tcp* ]]; then
   kill_orphaned_milvus_lite
   (
     _index_args=("$MEMORY_DIR" --replace)
