@@ -40,12 +40,15 @@ _json_val() {
   if command -v jq &>/dev/null; then
     result=$(printf '%s' "$json" | jq -r ".${key} // empty" 2>/dev/null) || true
   else
-    result=$(python3 -c "
+    # JSON goes via STDIN, not argv: large hook payloads (>32K) hit the
+    # Windows CreateProcess argv limit and every extraction silently
+    # returns its default.
+    result=$(printf '%s' "$json" | python3 -c "
 import json, sys
 try:
-    obj = json.loads(sys.argv[1])
+    obj = json.loads(sys.stdin.read())
     val = obj
-    for k in sys.argv[2].split('.'):
+    for k in sys.argv[1].split('.'):
         val = val[k]
     if val is None:
         print('')
@@ -55,7 +58,7 @@ try:
         print(val)
 except Exception:
     print('')
-" "$json" "$key" 2>/dev/null) || true
+" "$key" 2>/dev/null) || true
   fi
   if [ -z "$result" ]; then printf '%s' "$default"; else printf '%s' "$result"; fi
   return 0

@@ -9,24 +9,6 @@ set -euo pipefail
 # Determine install directory (parent of scripts/)
 INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-replace_text_in_file() {
-  local target_file="$1"
-  local old_text="$2"
-  local new_text="$3"
-
-  python3 - "$target_file" "$old_text" "$new_text" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-old = sys.argv[2]
-new = sys.argv[3]
-
-text = path.read_text()
-path.write_text(text.replace(old, new))
-PY
-}
-
 ensure_hooks_enabled() {
   local config_file="$1"
 

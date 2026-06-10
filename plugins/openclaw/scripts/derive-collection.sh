@@ -25,6 +25,28 @@ else
   esac
 fi
 
+# Canonicalize to forward-slash Windows form with an UPPERCASE drive letter
+# (e.g. D:/x) before hashing, so all four spellings of the same directory
+# (D:/x, D:\x, /d/x, d:/x) produce the SAME collection name. Genuine POSIX
+# paths pass through unchanged. Prefer cygpath -m (Git Bash); fall back to a
+# textual rewrite when it is unavailable.
+if command -v cygpath &>/dev/null; then
+  _canon="$(cygpath -m "$PROJECT_DIR" 2>/dev/null || true)"
+  [ -n "$_canon" ] && PROJECT_DIR="$_canon"
+else
+  PROJECT_DIR="${PROJECT_DIR//\\//}"   # backslashes → forward slashes
+  case "$PROJECT_DIR" in
+    /[A-Za-z]/*|/[A-Za-z])             # MSYS drive form /x/... → X:/...
+      _drv="$(printf '%s' "${PROJECT_DIR:1:1}" | tr '[:lower:]' '[:upper:]')"
+      PROJECT_DIR="${_drv}:/${PROJECT_DIR:3}"
+      ;;
+    [a-z]:*)                           # lowercase drive x:/... → X:/...
+      _drv="$(printf '%s' "${PROJECT_DIR:0:1}" | tr '[:lower:]' '[:upper:]')"
+      PROJECT_DIR="${_drv}${PROJECT_DIR:1}"
+      ;;
+  esac
+fi
+
 # Extract basename and sanitize:
 # - lowercase
 # - replace non-alphanumeric with underscore

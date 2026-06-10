@@ -19,7 +19,6 @@ import contextlib
 import hashlib
 import json
 import os
-import re
 import shlex
 import shutil
 import signal
@@ -39,7 +38,6 @@ from opencode_turns import (
     save_turn_state,
 )
 
-_ANCHOR_RE = re.compile(r"<!-- session:([^ ]+) turn:([^ ]+) db:")
 _TAIL_TURN_QUIET_PERIOD_MS = int(os.environ.get("MEMSEARCH_OPENCODE_TAIL_QUIET_MS", "300000"))
 
 
@@ -245,16 +243,25 @@ def get_session_ids(conn: sqlite3.Connection, project_dir: str) -> list[str]:
     ).fetchall()
 
     if not sessions:
-        sessions = conn.execute(
+        # Fallback for spelling mismatches (slash direction, drive-letter
+        # case). LIKE '%basename%' alone can match ANOTHER project whose
+        # path merely contains this basename — fetch candidates, then keep
+        # only rows whose resolved path equals the resolved project dir.
+        target = os.path.normcase(os.path.normpath(os.path.realpath(project_dir)))
+        candidates = conn.execute(
             """
-            SELECT s.id
+            SELECT s.id, s.directory
             FROM session s
             WHERE s.directory LIKE ?
             ORDER BY s.time_updated DESC
-            LIMIT 5
             """,
             (f"%{os.path.basename(project_dir)}%",),
         ).fetchall()
+        sessions = [
+            (row[0],)
+            for row in candidates
+            if os.path.normcase(os.path.normpath(os.path.realpath(row[1]))) == target
+        ][:5]
 
     return [row[0] for row in sessions]
 
@@ -271,27 +278,6 @@ def _load_legacy_last_msg_time(project_dir: str) -> int:
 
 def _make_capture_anchor_key(session_id: str, turn_id: str) -> tuple[str, str]:
     return (session_id, turn_id)
-
-
-def load_capture_anchor_cache(memory_dir: str) -> set[tuple[str, str]]:
-    if not os.path.isdir(memory_dir):
-        return set()
-
-    anchor_cache: set[tuple[str, str]] = set()
-    for name in os.listdir(memory_dir):
-        if not name.endswith(".md"):
-            continue
-
-        path = os.path.join(memory_dir, name)
-        try:
-            text = Path(path).read_text(encoding="utf-8")
-        except OSError:
-            continue
-
-        for session_id, turn_id in _ANCHOR_RE.findall(text):
-            anchor_cache.add(_make_capture_anchor_key(session_id, turn_id))
-
-    return anchor_cache
 
 
 def write_capture(
@@ -593,15 +579,30 @@ def main() -> None:
             if any_new:
                 # Index the memory ROOT (all repo/branch buckets), not just
                 # the active bucket — keeps cross-project search working.
-                os.system(
-                    f"{args.memsearch_cmd} index '{memory_root}' "
-                    f"--collection {args.collection_name} &"
+                # List-argv Popen, no shell: under cmd.exe single quotes are
+                # literal (memsearch would receive 'D:\...') and a trailing
+                # `&` is a command separator, not backgrounding.
+                subprocess.Popen(
+                    [
+                        *split_memsearch_cmd(args.memsearch_cmd),
+                        "index", memory_root,
+                        "--collection", args.collection_name,
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                 )
-                os.system(
-                    f"python3 {shlex.quote(str(Path(__file__).resolve().parent / 'maintenance-runner.py'))} "
-                    f"--platform opencode "
-                    f"--project-dir {shlex.quote(args.project_dir)} "
-                    f"--memsearch-dir {shlex.quote(memsearch_dir)} &"
+                # sys.executable: this IS a Python process — never trust a
+                # PATH `python3` that may be the Windows Store stub.
+                subprocess.Popen(
+                    [
+                        sys.executable,
+                        str(Path(__file__).resolve().parent / "maintenance-runner.py"),
+                        "--platform", "opencode",
+                        "--project-dir", args.project_dir,
+                        "--memsearch-dir", memsearch_dir,
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                 )
         except Exception:
             pass

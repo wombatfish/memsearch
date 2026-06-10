@@ -13,7 +13,7 @@
 
 import type { Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
-import { exec, spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   readFileSync,
   existsSync,
@@ -77,6 +77,31 @@ function detectMemsearchCmd(): MemsearchCmd {
 function serializeMemsearchCmd(cmd: MemsearchCmd): string {
   const quote = (s: string) => /[\s'"]/.test(s) ? `"${s.replace(/"/g, '\\"')}"` : s;
   return [cmd.argv0, ...cmd.prefixArgs].map(quote).join(" ");
+}
+
+/**
+ * Detect a WORKING Python interpreter, same probe style as detectMemsearchCmd.
+ * `where python3` succeeding is not enough on Windows — the WindowsApps Store
+ * stub resolves but fails at runtime, so probe by actually executing.
+ */
+let _pythonCmd: string | null = null;
+function getPythonCmd(): string {
+  if (_pythonCmd) return _pythonCmd;
+  for (const name of ["python3", "python"]) {
+    try {
+      const r = spawnSync(name, ["-c", "pass"], {
+        stdio: "ignore",
+        windowsHide: true,
+        timeout: 10000,
+      });
+      if (r.status === 0) {
+        _pythonCmd = name;
+        return _pythonCmd;
+      }
+    } catch { /* try next */ }
+  }
+  _pythonCmd = "python3";
+  return _pythonCmd;
 }
 
 /**
@@ -226,10 +251,8 @@ function getRecentMemories(
   return `Recent memories (use memsearch_search for full search):\n${summary.join("\n")}`;
 }
 
-/** Shell-escape a string for safe use inside single quotes. */
-function shellEscape(s: string): string {
-  return s.replace(/'/g, "'\\''");
-}
+/** Project dirs we started a capture daemon for — stopped again on dispose. */
+const startedDaemonDirs = new Set<string>();
 
 /**
  * Start the capture daemon as a background process.
@@ -244,6 +267,7 @@ function startCaptureDaemon(
   // multiple projects share a global memsearchDir.
   const pidFile = join(projectDir, ".memsearch", ".capture.pid");
   const daemonScript = join(PLUGIN_DIR, "scripts", "capture-daemon.py");
+  startedDaemonDirs.add(projectDir);
 
   if (existsSync(pidFile)) {
     try {
@@ -257,21 +281,33 @@ function startCaptureDaemon(
     } catch { /* ignore */ }
   }
 
+  // spawn with list argv, detached, no shell: exec() routes through cmd.exe
+  // on Windows where single quotes are literal and a trailing `&` is a
+  // command separator — and the 5s exec timeout killed cmd while the python
+  // child survived only by accident.
   const cmdStr = serializeMemsearchCmd(memsearchCmd);
-  exec(
-    `python3 "${daemonScript}" "${projectDir}" "${setup.collectionName}" ` +
-      `--memsearch-cmd "${shellEscape(cmdStr)}" ` +
-      `--memsearch-dir "${shellEscape(setup.memsearchDir)}" ` +
-      `--memory-dir "${shellEscape(setup.memoryBucketDir)}" ` +
-      `--memory-root "${shellEscape(setup.memoryDir)}" ` +
-      `--poll-interval 10 &`,
-    {
-      timeout: 5000,
-      env: { ...process.env, MEMSEARCH_NO_WATCH: "1" },
-      windowsHide: true,
-    },
-    () => { /* ignore */ }
-  );
+  try {
+    const child = spawn(
+      getPythonCmd(),
+      [
+        daemonScript,
+        projectDir,
+        setup.collectionName,
+        "--memsearch-cmd", cmdStr,
+        "--memsearch-dir", setup.memsearchDir,
+        "--memory-dir", setup.memoryBucketDir,
+        "--memory-root", setup.memoryDir,
+        "--poll-interval", "10",
+      ],
+      {
+        detached: true,
+        windowsHide: true,
+        stdio: "ignore",
+        env: { ...process.env, MEMSEARCH_NO_WATCH: "1" },
+      }
+    );
+    child.unref();
+  } catch { /* ignore */ }
 }
 
 /**
@@ -291,16 +327,21 @@ function stopCaptureDaemon(projectDir: string): void {
 
 function wakeMaintenance(projectDir: string, memsearchDir: string): void {
   const runner = join(PLUGIN_DIR, "scripts", "maintenance-runner.py");
-  exec(
-    `python3 '${shellEscape(runner)}' --platform opencode ` +
-      `--project-dir '${shellEscape(projectDir)}' --memsearch-dir '${shellEscape(memsearchDir)}' &`,
-    {
-      timeout: 5000,
-      env: { ...process.env, MEMSEARCH_NO_WATCH: "1" },
-      windowsHide: true,
-    },
-    () => { /* ignore */ }
-  );
+  // spawn-detached, list argv, no shell — see startCaptureDaemon for the
+  // cmd.exe single-quote / trailing-`&` rationale.
+  try {
+    const child = spawn(
+      getPythonCmd(),
+      [runner, "--platform", "opencode", "--project-dir", projectDir, "--memsearch-dir", memsearchDir],
+      {
+        detached: true,
+        windowsHide: true,
+        stdio: "ignore",
+        env: { ...process.env, MEMSEARCH_NO_WATCH: "1" },
+      }
+    );
+    child.unref();
+  } catch { /* ignore */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -361,6 +402,18 @@ const MemsearchPlugin: Plugin = async ({ project, directory, worktree }) => {
     dir === projectDir ? setup : resolveMemorySetup(dir);
 
   return {
+    // ----- Lifecycle: stop capture daemons on plugin shutdown -----
+    //
+    // Without this the `while True` daemon outlives every OpenCode session —
+    // one permanent orphan per project. Covers every dir we started a daemon
+    // for (tool calls may start daemons for other project dirs via setupFor).
+    dispose: async () => {
+      for (const dir of startedDaemonDirs) {
+        stopCaptureDaemon(dir);
+      }
+      startedDaemonDirs.clear();
+    },
+
     // ----- Tools -----
     //
     // Tool names are prefixed `memsearch_*` to avoid collisions with other

@@ -22,13 +22,18 @@ _latest_user_prompt_from_history() {
   if [ -z "$session_id" ] || [ ! -f "$history_file" ]; then
     return 0
   fi
+  if [ -z "${MEMSEARCH_PY:-}" ]; then
+    return 0
+  fi
 
-  python -c "
+  "$MEMSEARCH_PY" -c "
 import json, sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 session_id = sys.argv[1]
 history_file = sys.argv[2]
 latest = ''
-with open(history_file) as f:
+with open(history_file, encoding='utf-8', errors='replace') as f:
     for line in f:
         try:
             obj = json.loads(line)
@@ -97,8 +102,8 @@ run_worker() {
   # Load summarization prompt: user custom (via config) > plugin built-in template
   local AGENT_NAME="Codex"
   local PROMPT_FILE=""
-  if [ -n "$MEMSEARCH_CMD" ]; then
-    PROMPT_FILE=$($MEMSEARCH_CMD config get prompts.summarize 2>/dev/null || true)
+  if memsearch_available; then
+    PROMPT_FILE=$(_memsearch config get prompts.summarize 2>/dev/null || true)
   fi
   local SYSTEM_PROMPT=""
   if [ -n "$PROMPT_FILE" ] && [ -f "$PROMPT_FILE" ]; then
@@ -111,12 +116,12 @@ run_worker() {
 
   local SUMMARY=""
   local SUMMARIZE_PROVIDER=""
-  if [ -n "$MEMSEARCH_CMD" ]; then
-    SUMMARIZE_PROVIDER=$($MEMSEARCH_CMD config get plugins.codex.summarize.provider 2>/dev/null || true)
+  if memsearch_available; then
+    SUMMARIZE_PROVIDER=$(_memsearch config get plugins.codex.summarize.provider 2>/dev/null || true)
   fi
 
-  if [ -n "$SUMMARIZE_PROVIDER" ] && [ "$SUMMARIZE_PROVIDER" != "native" ] && [ -n "$MEMSEARCH_CMD" ]; then
-    SUMMARY=$(printf '%s' "$CONTENT" | MEMSEARCH_NO_WATCH=1 MEMSEARCH_IN_STOP_WORKER=1 $MEMSEARCH_CMD summarize \
+  if [ -n "$SUMMARIZE_PROVIDER" ] && [ "$SUMMARIZE_PROVIDER" != "native" ] && memsearch_available; then
+    SUMMARY=$(printf '%s' "$CONTENT" | MEMSEARCH_NO_WATCH=1 MEMSEARCH_IN_STOP_WORKER=1 "${MEMSEARCH_CMD[@]}" summarize \
       --plugin codex \
       --agent-name "$AGENT_NAME" \
       2>/dev/null || true)
@@ -128,9 +133,9 @@ Here is the transcript:
 
 ${CONTENT}"
     local SUMMARIZE_MODEL="gpt-5.1-codex-mini"
-    if [ -n "$MEMSEARCH_CMD" ]; then
+    if memsearch_available; then
       local CONFIG_MODEL
-      CONFIG_MODEL=$($MEMSEARCH_CMD config get plugins.codex.summarize.model 2>/dev/null || true)
+      CONFIG_MODEL=$(_memsearch config get plugins.codex.summarize.model 2>/dev/null || true)
       if [ -n "$CONFIG_MODEL" ]; then
         SUMMARIZE_MODEL="$CONFIG_MODEL"
       fi
@@ -160,7 +165,8 @@ ${CONTENT}"
   if [ -z "$SUMMARY" ]; then
     if [ -n "$LAST_MSG" ] && [ -n "$USER_QUESTION" ]; then
       local TRUNCATED_MSG
-      TRUNCATED_MSG=$(printf '%s' "$LAST_MSG" | head -c 800)
+      # Char slicing, not `head -c`: byte-clamping can cut mid-UTF-8 sequence.
+      TRUNCATED_MSG="${LAST_MSG:0:800}"
       if [ ${#LAST_MSG} -gt 800 ]; then
         TRUNCATED_MSG="${TRUNCATED_MSG}..."
       fi
@@ -168,7 +174,8 @@ ${CONTENT}"
 - Codex: ${TRUNCATED_MSG}"
     elif [ -n "$LAST_MSG" ]; then
       local TRUNCATED_MSG
-      TRUNCATED_MSG=$(printf '%s' "$LAST_MSG" | head -c 800)
+      # Char slicing, not `head -c`: byte-clamping can cut mid-UTF-8 sequence.
+      TRUNCATED_MSG="${LAST_MSG:0:800}"
       if [ ${#LAST_MSG} -gt 800 ]; then
         TRUNCATED_MSG="${TRUNCATED_MSG}..."
       fi
@@ -276,10 +283,12 @@ if [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
     exit 0
   fi
 
-  USER_QUESTION=$(python -c "
+  USER_QUESTION=$("${MEMSEARCH_PY:-python3}" -c "
 import json, sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 last_q = ''
-with open(sys.argv[1]) as f:
+with open(sys.argv[1], encoding='utf-8', errors='replace') as f:
     for line in f:
         try:
             obj = json.loads(line)
@@ -323,8 +332,15 @@ if [ ${#CONTENT} -gt 4000 ]; then
   CONTENT="${CONTENT:0:4000}...(truncated)"
 fi
 
+# The work-file writer needs a working Python; without one the worker would
+# get an empty payload and the turn would be lost anyway — bail out cleanly.
+if [ -z "${MEMSEARCH_PY:-}" ]; then
+  echo '{}'
+  exit 0
+fi
+
 WORK_FILE="$(mktemp "${TMPDIR:-/tmp}/memsearch-stop.XXXXXX.json")"
-python - "$WORK_FILE" "$NOW" "$MEMORY_FILE" "$SESSION_ID" "$TRANSCRIPT_PATH" "$CONTENT" "$USER_QUESTION" "$LAST_MSG" <<'PY'
+"$MEMSEARCH_PY" - "$WORK_FILE" "$NOW" "$MEMORY_FILE" "$SESSION_ID" "$TRANSCRIPT_PATH" "$CONTENT" "$USER_QUESTION" "$LAST_MSG" <<'PY'
 from pathlib import Path
 import json
 import sys
@@ -338,7 +354,7 @@ payload = {
     "user_question": sys.argv[7],
     "last_msg": sys.argv[8],
 }
-Path(sys.argv[1]).write_text(json.dumps(payload))
+Path(sys.argv[1]).write_text(json.dumps(payload), encoding="utf-8")
 PY
 
 echo '{}'

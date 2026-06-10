@@ -20,6 +20,21 @@ for p in "$HOME/.local/bin" "$HOME/.cargo/bin" "$HOME/bin" "/usr/local/bin"; do
   [[ -d "$p" ]] && [[ ":$PATH:" != *":$p:"* ]] && export PATH="$p:$PATH"
 done
 
+# Resolve a WORKING Python interpreter once. `command -v python3` can succeed
+# on the Windows Store stub that fails at runtime, and `python` may be absent
+# on POSIX — probe by actually executing. Exported so the detached Stop worker
+# and child scripts (parse-rollout.sh) reuse the same interpreter.
+MEMSEARCH_PY="${MEMSEARCH_PY:-}"
+if [ -z "$MEMSEARCH_PY" ]; then
+  for _py in python3 python; do
+    if command -v "$_py" >/dev/null 2>&1 && "$_py" -c pass >/dev/null 2>&1; then
+      MEMSEARCH_PY="$_py"
+      break
+    fi
+  done
+fi
+export MEMSEARCH_PY
+
 # --- JSON helpers (jq preferred, python fallback) ---
 
 # _json_val <json_string> <dotted_key> [default]
@@ -32,13 +47,16 @@ _json_val() {
   if command -v jq &>/dev/null; then
     # Build jq filter from dotted key: "info.version" â†’ ".info.version"
     result=$(printf '%s' "$json" | jq -r ".${key} // empty" 2>/dev/null) || true
-  else
-    result=$(python -c "
+  elif [ -n "${MEMSEARCH_PY:-}" ]; then
+    # JSON goes via STDIN, not argv: large hook payloads (>32K) hit the
+    # Windows CreateProcess argv limit and every extraction silently
+    # returns its default.
+    result=$(printf '%s' "$json" | "$MEMSEARCH_PY" -c "
 import json, sys
 try:
-    obj = json.loads(sys.argv[1])
+    obj = json.loads(sys.stdin.read())
     val = obj
-    for k in sys.argv[2].split('.'):
+    for k in sys.argv[1].split('.'):
         val = val[k]
     if val is None:
         print('')
@@ -48,7 +66,7 @@ try:
         print(val)
 except Exception:
     print('')
-" "$json" "$key" 2>/dev/null) || true
+" "$key" 2>/dev/null) || true
   fi
 
   if [ -z "$result" ]; then
@@ -66,7 +84,9 @@ _json_encode_str() {
   if command -v jq &>/dev/null; then
     printf '%s' "$str" | jq -Rs . 2>/dev/null && return 0
   fi
-  printf '%s' "$str" | python -c "import json,sys; print(json.dumps(sys.stdin.read()))" 2>/dev/null && return 0
+  if [ -n "${MEMSEARCH_PY:-}" ]; then
+    printf '%s' "$str" | "$MEMSEARCH_PY" -c "import json,sys; print(json.dumps(sys.stdin.read()))" 2>/dev/null && return 0
+  fi
   # Last resort: simple quoting (no special char escaping)
   printf '"%s"' "$str"
   return 0
@@ -195,8 +215,8 @@ run_memsearch() {
 }
 
 run_maintenance() {
-  if command -v python3 >/dev/null 2>&1; then
-    MEMSEARCH_NO_WATCH=1 python3 "$SCRIPT_DIR/../scripts/maintenance-runner.py" \
+  if [ -n "${MEMSEARCH_PY:-}" ]; then
+    MEMSEARCH_NO_WATCH=1 "$MEMSEARCH_PY" "$SCRIPT_DIR/../scripts/maintenance-runner.py" \
       --platform codex \
       --project-dir "$PROJECT_DIR" \
       --memsearch-dir "$MEMSEARCH_DIR" \

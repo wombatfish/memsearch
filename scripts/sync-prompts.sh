@@ -6,6 +6,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SHARED_DIR="$REPO_ROOT/plugins/_shared/prompts"
 
+# gemini is deliberately absent: its plugin is read-only (no capture, no
+# summarize prompt), so it ships no prompts/ dir to sync into.
 PLUGINS=(claude-code codex openclaw opencode)
 
 for plugin in "${PLUGINS[@]}"; do

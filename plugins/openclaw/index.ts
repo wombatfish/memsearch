@@ -21,8 +21,44 @@ import {
 } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
 
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Resolve the bash used for every shell invocation. On Windows, PATH-resolved
+ * "bash" can be C:\Windows\System32\bash.exe — the WSL launcher — which has
+ * its own Linux PATH and cannot run C:/ paths (same trap documented in
+ * plugins/opencode/index.ts detectMemsearchCmd). Probe known Git Bash
+ * locations once; fall back to plain "bash" elsewhere.
+ */
+let _bashCmd: string | null = null;
+function getBashCmd(): string {
+  if (_bashCmd) return _bashCmd;
+  if (process.platform === "win32") {
+    const roots = [
+      process.env["ProgramFiles"],
+      process.env["ProgramW6432"],
+      process.env["ProgramFiles(x86)"],
+      process.env["LOCALAPPDATA"] ? join(process.env["LOCALAPPDATA"], "Programs") : undefined,
+      "C:/Program Files",
+      "C:/Program Files (x86)",
+    ];
+    for (const root of roots) {
+      if (!root) continue;
+      for (const rel of ["Git/usr/bin/bash.exe", "Git/bin/bash.exe"]) {
+        const candidate = join(root, rel);
+        if (existsSync(candidate)) {
+          _bashCmd = candidate;
+          return _bashCmd;
+        }
+      }
+    }
+  }
+  _bashCmd = "bash";
+  return _bashCmd;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers (no external process calls — those live inside register())
@@ -296,7 +332,7 @@ export default {
     async function getMemsearchConfigValue(key: string): Promise<string> {
       const cmd = await getMemsearchCmd();
       const r = await runCmd(
-        ["bash", "-c", `${cmd} config get '${shellEscape(key)}'`],
+        [getBashCmd(), "-c", `${cmd} config get '${shellEscape(key)}'`],
         { timeoutMs: 5000 }
       );
       return r.stdout?.trim() || "";
@@ -307,7 +343,7 @@ export default {
         const runner = join(PLUGIN_DIR, "scripts", "maintenance-runner.py");
         runCmd(
           [
-            "bash", "-c",
+            getBashCmd(), "-c",
             `python3 '${shellEscape(runner)}' --platform openclaw ` +
               `--project-dir '${shellEscape(projectDir)}' ` +
               `--memsearch-dir '${shellEscape(memsearchDir)}'`,
@@ -330,7 +366,7 @@ export default {
       if (_collectionNameFor === projectDir) return _collectionName;
       const script = join(PLUGIN_DIR, "scripts", "derive-collection.sh");
       try {
-        const r = await runCmd(["bash", script, projectDir], { timeoutMs: 5000 });
+        const r = await runCmd([getBashCmd(), script, projectDir], { timeoutMs: 5000 });
         if (r.code === 0 && r.stdout?.trim()) {
           _collectionName = r.stdout.trim();
         } else {
@@ -409,7 +445,7 @@ export default {
               const collection = await getCollectionName();
               const result = await runCmd(
                 [
-                  "bash", "-c",
+                  getBashCmd(), "-c",
                   `${cmd} search '${shellEscape(params.query)}' ` +
                     `--top-k ${topK} --json-output --collection ${collection}`,
                 ],
@@ -462,7 +498,7 @@ export default {
               const collection = await getCollectionName();
               const result = await runCmd(
                 [
-                  "bash", "-c",
+                  getBashCmd(), "-c",
                   `${cmd} expand '${shellEscape(params.chunk_hash)}' ` +
                     `--collection ${collection}`,
                 ],
@@ -514,7 +550,7 @@ export default {
             try {
               const scriptPath = join(PLUGIN_DIR, "scripts", "parse-transcript.sh");
               const result = await runCmd(
-                ["bash", scriptPath, params.transcript_path],
+                [getBashCmd(), scriptPath, params.transcript_path],
                 { timeoutMs: 15000 }
               );
               const output = result.stdout?.trim() || result.stderr || "No transcript content";
@@ -603,12 +639,15 @@ export default {
         if (summarizeProvider && summarizeProvider !== "native") {
           try {
             const cmd = await getMemsearchCmd();
-            const tmpInput = `/tmp/memsearch-summarize-input-${Date.now()}.txt`;
+            // os.tmpdir(), not /tmp: Node resolves /tmp to <drive>:\tmp on Windows while
+            // Git Bash maps it to the user temp dir, so the round-trip would never
+            // find the file. Forward-slash form so Git Bash uses the path verbatim.
+            const tmpInput = join(tmpdir(), `memsearch-summarize-input-${randomUUID()}.txt`).replace(/\\/g, "/");
             writeFileSync(tmpInput, turnText, "utf-8");
             const shellCmd =
               `cat ${JSON.stringify(tmpInput)} | ${cmd} summarize ` +
               `--plugin openclaw --agent-name OpenClaw`;
-            const result = await runCmd(["bash", "-c", shellCmd], {
+            const result = await runCmd([getBashCmd(), "-c", shellCmd], {
               timeoutMs: 60000,
               env: envWithOverrides({ MEMSEARCH_NO_WATCH: "1", MEMSEARCH_DISABLE: "1" }),
             });
@@ -627,10 +666,10 @@ export default {
         // truncates stdout before the LLM response arrives.
         try {
           const msgText = `${systemPrompt}\n\nTranscript:\n${turnText}`;
-          const tmpFile = `/tmp/memsearch-summarize-${Date.now()}.txt`;
+          const tmpFile = join(tmpdir(), `memsearch-summarize-${randomUUID()}.txt`).replace(/\\/g, "/");
           const modelArg = summarizeModel ? ` --model ${JSON.stringify(summarizeModel)}` : "";
           const shellCmd = `openclaw agent --local --session-id memsearch-summarize${modelArg} -m ${JSON.stringify(msgText)} > ${JSON.stringify(tmpFile)} 2>/dev/null`;
-          await runCmd(["bash", "-c", shellCmd], {
+          await runCmd([getBashCmd(), "-c", shellCmd], {
             timeoutMs: 60000,
             env: envWithOverrides({ MEMSEARCH_NO_WATCH: "1", MEMSEARCH_DISABLE: "1" }),
           });
@@ -704,7 +743,7 @@ export default {
           const collection = await getCollectionName();
           runCmd(
             [
-              "bash", "-c",
+              getBashCmd(), "-c",
               `${cmd} index '${shellEscape(memoryDir)}' --collection ${collection}`,
             ],
             { timeoutMs: 60000 }
@@ -753,7 +792,7 @@ export default {
         if (!existsSync(configFile) && !existsSync(localConfig)) {
           try {
             await runCmd(
-              ["bash", "-c", `${cmd} config set embedding.provider onnx`],
+              [getBashCmd(), "-c", `${cmd} config set embedding.provider onnx`],
               { timeoutMs: 5000 }
             );
           } catch {
@@ -765,7 +804,7 @@ export default {
         if (existsSync(memoryDir)) {
           runCmd(
             [
-              "bash", "-c",
+              getBashCmd(), "-c",
               `${cmd} index '${shellEscape(memoryDir)}' --collection ${collection}`,
             ],
             { timeoutMs: 120000 }
@@ -796,7 +835,7 @@ export default {
             const collection = await getCollectionName();
             const result = await runCmd(
               [
-                "bash", "-c",
+                getBashCmd(), "-c",
                 `${memsearch} search '${shellEscape(query)}' ` +
                   `--top-k ${opts.topK || 5} --collection ${collection}`,
               ],
@@ -819,7 +858,7 @@ export default {
             const collection = await getCollectionName();
             const result = await runCmd(
               [
-                "bash", "-c",
+                getBashCmd(), "-c",
                 `${memsearch} index '${shellEscape(dir)}' --collection ${collection}`,
               ],
               { timeoutMs: 120000 }
@@ -846,7 +885,7 @@ export default {
           console.log(`AutoRecall:  ${autoRecall}`);
           try {
             const result = await runCmd(
-              ["bash", "-c", `${memsearch} stats --collection ${collection}`],
+              [getBashCmd(), "-c", `${memsearch} stats --collection ${collection}`],
               { timeoutMs: 10000 }
             );
             if (result.stdout) process.stdout.write(result.stdout);

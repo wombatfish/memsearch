@@ -36,7 +36,9 @@ fi
 
 MAX_RESULT_CHARS="${MEMSEARCH_MAX_RESULT_CHARS:-1000}"
 
-python3 -c '
+# Prefer the interpreter common.sh verified actually runs (python3 may be the
+# Windows Store stub); fall back to python3 when invoked standalone.
+"${MEMSEARCH_PY:-python3}" -c '
 import json, re, sys
 
 # Force UTF-8 on stdout — Python on Windows defaults to cp1252 and crashes
