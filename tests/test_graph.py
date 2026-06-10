@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import sys
 import threading
 from pathlib import Path
 from typing import Any
@@ -496,6 +498,39 @@ async def test_search_source_prefix_escapes_wildcards_and_bounds_path():
     assert "source like " in stub.last_filter  # path-bounded LIKE clause
 
 
+async def test_search_source_prefix_escapes_pattern_before_string_literal(tmp_path):
+    """LIKE escaping order: pattern-level first (\\ -> \\\\, % -> \\%, _ -> \\_),
+    THEN string-literal escaping of the finished pattern.  The old inverted
+    order let a trailing Windows path separator escape the appended % wildcard
+    (directory-scoped search silently returned nothing) and emitted % and _
+    with only a single backslash, which the string-literal decode consumed."""
+
+    class _FilterStore:
+        def search(self, emb, *, query_text: str = "", top_k: int = 10, filter_expr: str = "") -> list[dict[str, Any]]:
+            self.last_filter = filter_expr
+            return []
+
+    stub = _FilterStore()
+    m = MemSearch.__new__(MemSearch)
+    m._embedder = _FakeEmbedder()
+    m._reranker_model = ""
+    m._store = stub
+    m._graph_enabled = False
+    m._edges = None
+
+    await m.search("q", source_prefix=tmp_path / "pct%un_der")
+
+    like_clause = stub.last_filter.split(" or ", 1)[1]
+    # Path's % and _: pattern-escaped (\%, \_) then literal-escaped -> two
+    # backslashes in the final expression (the buggy order produced one).
+    assert ("\\" * 2) + "%un" in like_clause
+    assert ("\\" * 2) + "_der" in like_clause
+    # The appended wildcard must survive: after the separator (4 backslashes on
+    # Windows: pattern-escape then literal-escape) comes a bare, unescaped %.
+    sep_encoded = "\\" * 4 if os.sep == "\\" else os.sep
+    assert stub.last_filter.endswith(sep_encoded + '%"')
+
+
 # ----------------------------------------------------------------------
 # E) _index_file embed-first reorder: new chunks are stored BEFORE stale
 #    ones are deleted, so an embed failure never opens a transient hole.
@@ -567,3 +602,88 @@ def test_index_file_emptied_file_still_deletes_stale(tmp_path):
     assert n == 0
     assert len(store.delete_calls) == 1
     assert set(store.delete_calls[0]) == old  # exactly the old set (order nondeterministic)
+
+
+def test_index_file_strips_bom_and_tolerates_bad_bytes(tmp_path):
+    """utf-8-sig: a BOM must not land in the first chunk's content/hash, and a
+    stray invalid byte must not make the whole file unindexable."""
+    f = tmp_path / "doc.md"
+    f.write_bytes(b"\xef\xbb\xbf# Title\n\nbody with a bad \xff byte\n")
+    store = _StaleSpyStore(set())
+    m = _make_index_mem(store)
+    captured: list[Any] = []
+
+    async def _capture(chunks):
+        captured.extend(chunks)
+        return len(chunks)
+
+    m._embed_and_store = _capture  # type: ignore[method-assign]
+
+    sf = ScannedFile(path=f, mtime=0.0, size=f.stat().st_size)
+    asyncio.run(m._index_file(sf))
+
+    assert captured, "file with a bad byte must still produce chunks"
+    assert captured[0].content.startswith("# Title")  # BOM stripped
+    assert "\ufeff" not in captured[0].content
+
+
+# ----------------------------------------------------------------------
+# F) Path normalization: watcher delete resolution + GC case drift on NTFS
+# ----------------------------------------------------------------------
+
+
+def test_dispatch_event_deleted_resolves_path_like_indexing(tmp_path):
+    """The watcher's deleted branch must delete by the SAME resolved path form
+    indexing stores (str(Path(...).expanduser().resolve())) — a raw watchdog
+    path that differs in form would leave the file's chunks behind forever."""
+    deleted: list[str] = []
+
+    class _SpyStore:
+        def hashes_by_source(self, source: str) -> set[str]:
+            return set()
+
+        def delete_by_source(self, source: str) -> None:
+            deleted.append(source)
+
+    m = MemSearch.__new__(MemSearch)
+    m._watch_loop = asyncio.new_event_loop()
+    m._watch_lock = threading.Lock()
+    m._watch_on_event = None
+    m._edges = None
+    m._store = _SpyStore()
+
+    m._dispatch_event("deleted", Path("some.md"))  # relative, unresolved
+    m._watch_loop.close()
+
+    assert deleted == [str(Path("some.md").expanduser().resolve())]
+
+
+def test_index_gc_prunes_case_drifted_stale_source(tmp_path):
+    """Deleted-file GC scope check must be case-insensitive on Windows: a stale
+    stored source whose case drifted from the scope root must still be pruned
+    (pre-3.12 Path.is_relative_to compares case-sensitively). On POSIX the
+    drifted form is the identity, so this also guards plain in-scope pruning."""
+    stale = str((tmp_path / "sub" / "gone.md").resolve())
+    drifted = stale.upper() if sys.platform == "win32" else stale
+
+    class _GCStore:
+        def __init__(self) -> None:
+            self.deleted: list[str] = []
+
+        def indexed_sources(self) -> set[str]:
+            return {drifted}
+
+        def hashes_by_source(self, source: str) -> set[str]:
+            return set()
+
+        def delete_by_source(self, source: str) -> None:
+            self.deleted.append(source)
+
+    m = MemSearch.__new__(MemSearch)
+    m._paths = [str(tmp_path)]
+    m._edges = None
+    m._store = _GCStore()
+
+    asyncio.run(m.index())
+
+    assert m._store.deleted == [drifted]

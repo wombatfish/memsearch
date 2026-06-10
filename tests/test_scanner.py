@@ -62,3 +62,21 @@ def test_scan_deduplicates(tmp_path: Path):
     results = scan_paths([f, f, tmp_path])
     names = [r.path.name for r in results]
     assert names.count("dup.md") == 1
+
+
+def test_scan_skips_file_deleted_between_walk_and_stat(tmp_path: Path, monkeypatch):
+    """A file vanishing between the walk and stat() must be skipped, not abort
+    the entire scan."""
+    (tmp_path / "gone.md").write_text("# gone")
+    (tmp_path / "stays.md").write_text("# stays")
+
+    real_stat = Path.stat
+
+    def flaky_stat(self: Path, **kwargs):
+        if self.name == "gone.md":
+            raise FileNotFoundError(f"deleted mid-scan: {self}")
+        return real_stat(self, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", flaky_stat)
+    results = scan_paths([tmp_path])
+    assert [r.path.name for r in results] == ["stays.md"]

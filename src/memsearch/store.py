@@ -290,7 +290,7 @@ class MilvusStore:
         res = self._client.search(**search_kwargs)
         return [[{"chunk_hash": h["entity"]["chunk_hash"], "score": h["distance"]} for h in hits] for hits in res]
 
-    def iter_chunks(self, *, with_embeddings: bool = False) -> Iterator[dict[str, Any]]:
+    def iter_chunks(self, *, with_embeddings: bool = False, filter_expr: str = "") -> Iterator[dict[str, Any]]:
         """Yield every stored chunk via query_iterator (paginated, avoids loading the whole
         collection at once). Includes 'embedding' in output_fields when with_embeddings=True."""
         output_fields = list(self._QUERY_FIELDS)
@@ -300,7 +300,7 @@ class MilvusStore:
         it = self._client.query_iterator(
             collection_name=self._collection,
             batch_size=1000,
-            filter='chunk_hash != ""',
+            filter=filter_expr if filter_expr else 'chunk_hash != ""',
             output_fields=output_fields,
             **self._consistency_kwargs(),
         )
@@ -333,14 +333,27 @@ class MilvusStore:
         return {r["chunk_hash"] for r in results}
 
     def indexed_sources(self) -> set[str]:
-        """Return all distinct source values in the collection."""
-        results = self._client.query(
+        """Return all distinct source values in the collection.
+
+        Streams via query_iterator: a plain query() without limit is capped at
+        16384 rows by remote Milvus, silently truncating the source set (and
+        making the deleted-file GC skip sources).
+        """
+        it = self._client.query_iterator(
             collection_name=self._collection,
+            batch_size=1000,
             filter='chunk_hash != ""',
             output_fields=["source"],
             **self._consistency_kwargs(),
         )
-        return {r["source"] for r in results}
+        sources: set[str] = set()
+        while True:
+            batch = it.next()
+            if not batch:
+                it.close()
+                break
+            sources.update(r["source"] for r in batch)
+        return sources
 
     def delete_by_source(self, source: str) -> None:
         """Delete all chunks from a given source file."""
@@ -362,7 +375,7 @@ class MilvusStore:
     def count(self) -> int:
         """Return total number of stored chunks."""
         stats = self._client.get_collection_stats(self._collection)
-        return stats.get("row_count", 0)
+        return int(stats.get("row_count", 0))  # pymilvus may return row_count as str
 
     def drop(self) -> None:
         """Drop the entire collection."""

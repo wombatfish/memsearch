@@ -183,46 +183,54 @@ def _split_large_section(
         else:
             _emit(content, start_line, end_line)
 
+    # Running length of "\n".join(current_lines), maintained incrementally so
+    # the size checks below don't re-join (O(section^2)) on every line.
+    current_len = 0
+
     for i, line in enumerate(lines):
+        current_len += len(line) + 1 if current_lines else len(line)
         current_lines.append(line)
-        text = "\n".join(current_lines)
 
         is_paragraph_break = line.strip() == "" and i + 1 < len(lines)
         is_last_line = i == len(lines) - 1
 
         # Preferred: split at paragraph boundary
-        if len(text) >= max_size and is_paragraph_break:
-            _emit_bounded(text, base_line + current_start + 1, base_line + i + 1)
+        if current_len >= max_size and is_paragraph_break:
+            _emit_bounded("\n".join(current_lines), base_line + current_start + 1, base_line + i + 1)
             overlap_start = max(0, len(current_lines) - overlap)
             current_lines = current_lines[overlap_start:]
+            current_len = len("\n".join(current_lines))
             current_start = i + 1 - len(current_lines)
             continue
 
         # Forced line-boundary split: no paragraph break found but text is
         # too large.  Roll back the current line so the previous lines form
         # a chunk and the current line starts the next one.
-        if len(text) >= max_size and not is_paragraph_break and len(current_lines) > 1:
+        if current_len >= max_size and not is_paragraph_break and len(current_lines) > 1:
             current_lines.pop()
             content = "\n".join(current_lines).strip()
             _emit_bounded(content, base_line + current_start + 1, base_line + i)
             overlap_start = max(0, len(current_lines) - overlap)
             current_lines = current_lines[overlap_start:]
             current_lines.append(line)  # re-add the rolled-back line
+            current_len = len("\n".join(current_lines))
             current_start = i - len(current_lines) + 1
             continue
 
         # Single line exceeds max_size — split within the line
-        if len(text) >= max_size and len(current_lines) == 1:
-            sub_chunks = _split_long_text(text, max_size)
+        if current_len >= max_size and len(current_lines) == 1:
+            sub_chunks = _split_long_text(line, max_size)
             for part in sub_chunks:
                 _emit(part.strip(), base_line + current_start + 1, base_line + i + 1)
             current_lines = []
+            current_len = 0
             current_start = i + 1
             continue
 
         if is_last_line:
-            _emit_bounded(text, base_line + current_start + 1, base_line + i + 1)
+            _emit_bounded("\n".join(current_lines), base_line + current_start + 1, base_line + i + 1)
             current_lines = []
+            current_len = 0
 
     # Flush any remaining content (e.g. a rolled-back line from the last
     # iteration that never got a chance to be emitted).

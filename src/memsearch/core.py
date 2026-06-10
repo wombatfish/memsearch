@@ -173,12 +173,16 @@ class MemSearch:
         # All paths are resolved-absolute (scanner resolves f.path; scope_roots
         # resolved here), so the lexical compare is sound. The scope guard can only
         # ever *skip* deletions, never add them — it cannot cause data loss.
-        scope_roots = [Path(p).expanduser().resolve() for p in self._paths]
+        # NTFS is case-insensitive but pre-3.12 Path.is_relative_to compares
+        # case-sensitively, so normcase both sides of the scope check — case
+        # drift between stored sources and scope roots must not hide a stale
+        # source from the GC. normcase is the identity on POSIX (no change).
+        scope_roots = [Path(os.path.normcase(str(Path(p).expanduser().resolve()))) for p in self._paths]
         indexed_sources = self._store.indexed_sources()
         for source in indexed_sources:
             if source in active_sources:
                 continue
-            if not any(Path(source).is_relative_to(r) for r in scope_roots):
+            if not any(Path(os.path.normcase(source)).is_relative_to(r) for r in scope_roots):
                 continue
             if self._edges is not None:
                 self._edges.delete_by_hashes(list(self._store.hashes_by_source(source)))
@@ -200,7 +204,10 @@ class MemSearch:
 
     async def _index_file(self, f: ScannedFile, *, force: bool = False) -> int:
         source = str(f.path)
-        text = f.path.read_text(encoding="utf-8")
+        # utf-8-sig: swallow a BOM so it never lands in the first chunk's
+        # content/hash; errors="replace": a stray bad byte must not make the
+        # whole file unindexable (markdown is the source of truth).
+        text = f.path.read_text(encoding="utf-8-sig", errors="replace")
         chunks = chunk_markdown(
             text,
             source=source,
@@ -274,7 +281,9 @@ class MemSearch:
                     "embedding": embeddings[i],
                     "content": chunk.content,
                     "source": chunk.source,
-                    "heading": chunk.heading,
+                    # Truncate to fit the heading VARCHAR (max_length=1024) —
+                    # an oversize heading would fail the entire batch upsert.
+                    "heading": chunk.heading[:1000],
                     "heading_level": chunk.heading_level,
                     "start_line": chunk.start_line,
                     "end_line": chunk.end_line,
@@ -282,6 +291,9 @@ class MemSearch:
             )
 
         n = self._store.upsert(records)
+        # Note: under Bounded consistency a remote Milvus may not yet see the
+        # chunks just upserted above, so intra-batch similar edges can be
+        # missed here. Acceptable: `memsearch graph rebuild` recovers them.
         if self._edges is not None and self._graph_similar_top_n > 0:
             ids = [r["chunk_hash"] for r in records]
             sim_edges: list[tuple[str, str, str, float, str]] = []
@@ -381,7 +393,12 @@ class MemSearch:
             prefix = str(Path(source_prefix).expanduser().resolve())
 
             def _esc_like(v: str) -> str:
-                return _escape_filter_value(v).replace("%", "\\%").replace("_", "\\_")
+                # Pattern-level escaping FIRST (a literal backslash must become
+                # \\ before % and _ are escaped, or a trailing Windows path
+                # separator swallows the appended % wildcard), THEN escape the
+                # finished pattern as a Milvus string literal.
+                pattern = v.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                return _escape_filter_value(pattern)
 
             prefix_with_sep = prefix if prefix.endswith(os.sep) else prefix + os.sep
             filter_expr = f'source == "{_escape_filter_value(prefix)}" or source like "{_esc_like(prefix_with_sep)}%"'
@@ -505,7 +522,9 @@ class MemSearch:
         from .store import _escape_filter_value
 
         filter_expr = f'source == "{_escape_filter_value(source)}"' if source else ""
-        all_chunks = self._store.query(filter_expr=filter_expr)
+        # Stream via iter_chunks: a plain query() without limit is capped at
+        # 16384 rows by remote Milvus, silently summarizing only a subset.
+        all_chunks = list(self._store.iter_chunks(filter_expr=filter_expr))
         if not all_chunks:
             return ""
 
@@ -524,7 +543,7 @@ class MemSearch:
         memory_dir.mkdir(parents=True, exist_ok=True)
         compact_file = memory_dir / f"{date.today()}.md"
         compact_heading = "\n\n## Memory Compact\n\n"
-        with open(compact_file, "a", encoding="utf-8") as f:
+        with open(compact_file, "a", encoding="utf-8", newline="\n") as f:
             if compact_file.stat().st_size == 0:
                 f.write(f"# {date.today()}\n")
             f.write(compact_heading)
@@ -547,9 +566,13 @@ class MemSearch:
         with self._watch_lock:
             try:
                 if event_type == "deleted":
+                    # Resolve the raw watchdog path the same way indexing does
+                    # (index_file stores str(Path(...).expanduser().resolve())),
+                    # or a case/format mismatch on NTFS leaves chunks behind.
+                    source = str(Path(file_path).expanduser().resolve())
                     if self._edges is not None:
-                        self._edges.delete_by_hashes(list(self._store.hashes_by_source(str(file_path))))
-                    self._store.delete_by_source(str(file_path))
+                        self._edges.delete_by_hashes(list(self._store.hashes_by_source(source)))
+                    self._store.delete_by_source(source)
                     summary = f"Removed chunks for {file_path}"
                 else:
                     n = self._watch_loop.run_until_complete(self.index_file(file_path))

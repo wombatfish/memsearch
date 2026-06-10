@@ -63,6 +63,18 @@ class _MarkdownHandler(FileSystemEventHandler):
         if not event.is_directory and self._is_markdown(event.src_path):
             self._schedule("deleted", event.src_path)
 
+    def on_moved(self, event: FileSystemEvent) -> None:
+        # Windows (ReadDirectoryChangesW) reports os.replace-style atomic saves
+        # as move events — without this handler editor saves never reindex.
+        # The destination is treated as modified, the source as deleted.
+        if event.is_directory:
+            return
+        if self._is_markdown(event.src_path):
+            self._schedule("deleted", event.src_path)
+        dest_path = getattr(event, "dest_path", "")
+        if dest_path and self._is_markdown(dest_path):
+            self._schedule("modified", dest_path)
+
     def cancel_all(self) -> None:
         """Cancel all pending debounce timers."""
         with self._lock:

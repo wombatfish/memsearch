@@ -148,9 +148,32 @@ def test_hashes_by_source_lite_omits_consistency():
 
 
 def test_indexed_sources_passes_consistency_on_remote():
+    # indexed_sources now streams via query_iterator (a plain query() is capped
+    # at 16384 rows by remote Milvus) — the consistency kwarg must follow it.
     s = _bare_store(is_lite=False, consistency="Strong")
     s.indexed_sources()
-    assert s._client.query_calls[0]["consistency_level"] == "Strong"
+    assert s._client.query_iterator_kwargs["consistency_level"] == "Strong"
+
+
+def test_indexed_sources_streams_only_source_field():
+    # Must use query_iterator (unbounded row count) and only transfer `source`.
+    s = _bare_store(is_lite=False, consistency="")
+    assert s.indexed_sources() == {"s.md"}
+    assert s._client.query_calls == []  # no capped plain query
+    assert s._client.query_iterator_kwargs["output_fields"] == ["source"]
+
+
+def test_iter_chunks_honors_filter_expr():
+    s = _bare_store(is_lite=False, consistency="")
+    list(s.iter_chunks(filter_expr='source == "a.md"'))
+    assert s._client.query_iterator_kwargs["filter"] == 'source == "a.md"'
+
+
+def test_count_coerces_row_count_to_int():
+    # pymilvus may return row_count as a string — count() must coerce.
+    client = _FakeClient(row_count="7")  # type: ignore[arg-type]
+    s = _bare_store(is_lite=False, consistency="", client=client)
+    assert s.count() == 7
 
 
 # --- cold-start guard: sealed-segment row_count=0 must not drop unsealed data ---

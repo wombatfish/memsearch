@@ -61,5 +61,8 @@ def _maybe_add(
     if real in seen:
         return
     seen.add(real)
-    stat = fp.stat()
+    try:
+        stat = fp.stat()
+    except OSError:
+        return  # file vanished between walk and stat — skip it
     results.append(ScannedFile(path=fp, mtime=stat.st_mtime, size=stat.st_size))
