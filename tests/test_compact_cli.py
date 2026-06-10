@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import ClassVar
 
 from click.testing import CliRunner
 
@@ -13,10 +14,12 @@ from memsearch.config import save_config
 class DummyMemSearch:
     last_source = None
     last_prompt_template = None
+    last_kwargs: ClassVar[dict] = {}
 
     async def compact(self, **kwargs):
         DummyMemSearch.last_source = kwargs["source"]
         DummyMemSearch.last_prompt_template = kwargs["prompt_template"]
+        DummyMemSearch.last_kwargs = kwargs
         return ""
 
     def close(self) -> None:
@@ -87,6 +90,50 @@ def test_compact_reads_prompt_file_and_passes_template(monkeypatch, tmp_path: Pa
 
     assert result.exit_code == 0
     assert DummyMemSearch.last_prompt_template == "Summarize carefully:\n{chunks}\n"
+
+
+def test_compact_cli_llm_flags_beat_llm_config_section(monkeypatch, tmp_path: Path):
+    """Explicit --llm-* CLI flags must win over a [llm] config section
+    (previously they mapped into [compact] and lost to [llm])."""
+    cfg_path = tmp_path / "config.toml"
+    save_config(
+        {"llm": {"provider": "anthropic", "model": "config-model", "base_url": "https://config.example.com"}},
+        cfg_path,
+    )
+    monkeypatch.setattr("memsearch.config.GLOBAL_CONFIG_PATH", cfg_path)
+    monkeypatch.setattr("memsearch.config.PROJECT_CONFIG_PATH", tmp_path / "nope.toml")
+    monkeypatch.setattr("memsearch.core.MemSearch", lambda **kwargs: DummyMemSearch())
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["compact", "--llm-provider", "gemini", "--llm-model", "cli-model", "--llm-base-url", "https://cli.example.com"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert DummyMemSearch.last_kwargs["llm_provider"] == "gemini"
+    assert DummyMemSearch.last_kwargs["llm_model"] == "cli-model"
+    assert DummyMemSearch.last_kwargs["llm_base_url"] == "https://cli.example.com"
+
+
+def test_compact_cli_prompt_file_beats_prompts_config(monkeypatch, tmp_path: Path):
+    """--prompt-file must win over a prompts.compact config entry."""
+    config_prompt = tmp_path / "config-prompt.txt"
+    config_prompt.write_text("From config:\n{chunks}\n", encoding="utf-8")
+    cli_prompt = tmp_path / "cli-prompt.txt"
+    cli_prompt.write_text("From CLI:\n{chunks}\n", encoding="utf-8")
+
+    cfg_path = tmp_path / "config.toml"
+    save_config({"prompts": {"compact": str(config_prompt)}}, cfg_path)
+    monkeypatch.setattr("memsearch.config.GLOBAL_CONFIG_PATH", cfg_path)
+    monkeypatch.setattr("memsearch.config.PROJECT_CONFIG_PATH", tmp_path / "nope.toml")
+    monkeypatch.setattr("memsearch.core.MemSearch", lambda **kwargs: DummyMemSearch())
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["compact", "--prompt-file", str(cli_prompt)])
+
+    assert result.exit_code == 0, result.output
+    assert DummyMemSearch.last_prompt_template == "From CLI:\n{chunks}\n"
 
 
 def test_summarize_uses_named_provider(monkeypatch, tmp_path: Path):

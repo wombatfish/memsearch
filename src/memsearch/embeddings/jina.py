@@ -48,7 +48,7 @@ class JinaEmbedding:
         dimensions: int | None = None,
         api_key: str | None = None,
     ) -> None:
-        import httpx
+        import httpx  # noqa: F401 — fail fast at construction if the extra is missing
 
         self._api_key = api_key or os.environ.get("JINA_API_KEY")
         if not self._api_key:
@@ -58,7 +58,6 @@ class JinaEmbedding:
         self._task = task
         self._dimensions = dimensions if dimensions is not None else _KNOWN_DIMENSIONS.get(model, 2048)
         self._batch_size = batch_size if batch_size > 0 else self._DEFAULT_BATCH_SIZE
-        self._client = httpx.AsyncClient(timeout=self._TIMEOUT_SECONDS)
 
     @property
     def model_name(self) -> str:
@@ -74,6 +73,8 @@ class JinaEmbedding:
         return await batched_embed(texts, self._embed_batch, self._batch_size)
 
     async def _embed_batch(self, texts: list[str]) -> list[list[float]]:
+        import httpx
+
         body: dict = {
             "model": self._model,
             "input": texts,
@@ -83,14 +84,16 @@ class JinaEmbedding:
         if self._dimensions:
             body["dimensions"] = self._dimensions
 
-        resp = await self._client.post(
-            _API_URL,
-            json=body,
-            headers={
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-            },
-        )
-        resp.raise_for_status()
-        payload = resp.json()
+        # Per-call client so connections are always closed (no leaked AsyncClient).
+        async with httpx.AsyncClient(timeout=self._TIMEOUT_SECONDS) as client:
+            resp = await client.post(
+                _API_URL,
+                json=body,
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            resp.raise_for_status()
+            payload = resp.json()
         return [item["embedding"] for item in payload["data"]]

@@ -102,57 +102,67 @@ def _find_onnx_file(repo_id: str, repo_files: list[str]) -> str:
 
 
 def _load_onnx_model(model_name: str) -> _OnnxCachedModel:
-    """Download (if needed) and load an ONNX cross-encoder model."""
+    """Download (if needed) and load an ONNX cross-encoder model.
+
+    The cache lock is held across the whole download/load so concurrent first
+    callers do not double-download the model.
+    """
     with _onnx_cache_lock:
         if model_name in _onnx_cache:
             return _onnx_cache[model_name]
 
-    from huggingface_hub import hf_hub_download, list_repo_files
-    from tokenizers import Tokenizer
+        from huggingface_hub import hf_hub_download, list_repo_files
+        from tokenizers import Tokenizer
 
-    repo_id = model_name
-    onnx_file = None
-    if model_name in _KNOWN_ONNX_MODELS:
-        repo_id, onnx_file = _KNOWN_ONNX_MODELS[model_name]
+        repo_id = model_name
+        onnx_file = None
+        if model_name in _KNOWN_ONNX_MODELS:
+            repo_id, onnx_file = _KNOWN_ONNX_MODELS[model_name]
 
-    repo_files = list(list_repo_files(repo_id))
-    if onnx_file is None:
-        onnx_file = _find_onnx_file(repo_id, repo_files)
+        repo_files = list(list_repo_files(repo_id))
+        if onnx_file is None:
+            onnx_file = _find_onnx_file(repo_id, repo_files)
 
-    # Download external data file if present (e.g. model.onnx_data)
-    data_file = onnx_file + "_data"
-    if data_file in repo_files:
-        hf_hub_download(repo_id, data_file)
-    model_path = hf_hub_download(repo_id, onnx_file)
+        # Download external data file if present (e.g. model.onnx_data)
+        data_file = onnx_file + "_data"
+        if data_file in repo_files:
+            hf_hub_download(repo_id, data_file)
+        model_path = hf_hub_download(repo_id, onnx_file)
 
-    tok_path = hf_hub_download(repo_id, "tokenizer.json")
-    tokenizer = Tokenizer.from_file(tok_path)
-    tokenizer.enable_truncation(max_length=_MAX_RERANK_TOKENS)
-    tokenizer.no_padding()
+        tok_path = hf_hub_download(repo_id, "tokenizer.json")
+        tokenizer = Tokenizer.from_file(tok_path)
+        tokenizer.enable_truncation(max_length=_MAX_RERANK_TOKENS)
+        tokenizer.no_padding()
 
-    import onnxruntime as ort
+        import onnxruntime as ort
 
-    session = ort.InferenceSession(model_path)
-    input_names = {inp.name for inp in session.get_inputs()}
+        session = ort.InferenceSession(model_path)
+        input_names = {inp.name for inp in session.get_inputs()}
 
-    cached = _OnnxCachedModel(session=session, tokenizer=tokenizer, input_names=input_names)
-    logger.info("Loaded ONNX cross-encoder reranker: %s (%s)", model_name, onnx_file)
+        cached = _OnnxCachedModel(session=session, tokenizer=tokenizer, input_names=input_names)
+        logger.info("Loaded ONNX cross-encoder reranker: %s (%s)", model_name, onnx_file)
 
-    with _onnx_cache_lock:
-        if model_name not in _onnx_cache:
-            _onnx_cache[model_name] = cached
-        return _onnx_cache[model_name]
+        _onnx_cache[model_name] = cached
+        return cached
+
+
+def _sigmoid(x: float) -> float:
+    """Numerically safe sigmoid: math.exp(-x) overflows for x < ~-709."""
+    if x >= 0:
+        return 1.0 / (1.0 + math.exp(-x))
+    e = math.exp(x)
+    return e / (1.0 + e)
 
 
 def _extract_scores(logits: np.ndarray) -> list[float]:
     """Convert raw model logits to relevance scores."""
     if logits.ndim == 2 and logits.shape[1] == 1:
-        return [1.0 / (1.0 + math.exp(-float(x))) for x in logits[:, 0]]
+        return [_sigmoid(float(x)) for x in logits[:, 0]]
     if logits.ndim == 2 and logits.shape[1] == 2:
         exp = np.exp(logits - logits.max(axis=1, keepdims=True))
         softmax = exp / exp.sum(axis=1, keepdims=True)
         return softmax[:, 1].tolist()
-    return [1.0 / (1.0 + math.exp(-float(x))) for x in logits.flatten()]
+    return [_sigmoid(float(x)) for x in logits.flatten()]
 
 
 def _rerank_onnx(query: str, results: list[dict[str, Any]], model_name: str, top_k: int) -> list[dict[str, Any]]:
@@ -199,20 +209,22 @@ _torch_cache_lock = threading.Lock()
 
 
 def _load_torch_model(model_name: str) -> Any:
-    """Load a sentence-transformers CrossEncoder model."""
+    """Load a sentence-transformers CrossEncoder model.
+
+    The cache lock is held across the whole load so concurrent first callers
+    do not double-download the model.
+    """
     with _torch_cache_lock:
         if model_name in _torch_cache:
             return _torch_cache[model_name]
 
-    from sentence_transformers import CrossEncoder
+        from sentence_transformers import CrossEncoder
 
-    model = CrossEncoder(model_name, max_length=_MAX_RERANK_TOKENS)
-    logger.info("Loaded PyTorch cross-encoder reranker: %s", model_name)
+        model = CrossEncoder(model_name, max_length=_MAX_RERANK_TOKENS)
+        logger.info("Loaded PyTorch cross-encoder reranker: %s", model_name)
 
-    with _torch_cache_lock:
-        if model_name not in _torch_cache:
-            _torch_cache[model_name] = model
-        return _torch_cache[model_name]
+        _torch_cache[model_name] = model
+        return model
 
 
 def _rerank_torch(query: str, results: list[dict[str, Any]], model_name: str, top_k: int) -> list[dict[str, Any]]:

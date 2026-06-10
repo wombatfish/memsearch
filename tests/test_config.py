@@ -497,6 +497,18 @@ def test_compact_config_set_get_roundtrip(tmp_path: Path, monkeypatch: pytest.Mo
     assert get_config_value("compact.api_key", cfg) == "sk-custom-123"
 
 
+def test_legacy_compact_section_warns_visibly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A [compact] section must emit a UserWarning (DeprecationWarning is filtered
+    by default, so CLI users would never see it)."""
+    cfg_file = tmp_path / "config.toml"
+    save_config({"compact": {"llm_provider": "openai"}}, cfg_file)
+    monkeypatch.setattr("memsearch.config.GLOBAL_CONFIG_PATH", cfg_file)
+    monkeypatch.setattr("memsearch.config.PROJECT_CONFIG_PATH", tmp_path / "nope.toml")
+
+    with pytest.warns(UserWarning, match=r"\[compact\] config section is deprecated"):
+        resolve_config()
+
+
 def test_milvus_consistency_level_roundtrips() -> None:
     cfg = _dict_to_config({"milvus": {"consistency_level": "Strong"}})
     assert cfg.milvus.consistency_level == "Strong"

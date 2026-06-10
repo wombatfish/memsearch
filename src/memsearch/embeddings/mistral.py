@@ -41,7 +41,9 @@ class MistralEmbedding:
 
         self._client = Mistral(api_key=self._api_key)
         self._model = model
-        self._dimension = _detect_dimension(self._client, model)
+        # Known models resolve from the table; unknown models defer the trial
+        # embed until the dimension is first needed (no network at construction).
+        self._dimension: int | None = _KNOWN_DIMENSIONS.get(model)
         self._batch_size = batch_size if batch_size > 0 else self._DEFAULT_BATCH_SIZE
 
     @property
@@ -50,6 +52,8 @@ class MistralEmbedding:
 
     @property
     def dimension(self) -> int:
+        if self._dimension is None:
+            self._dimension = _detect_dimension(self._client, self._model)
         return self._dimension
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
@@ -63,12 +67,9 @@ class MistralEmbedding:
 
 
 def _detect_dimension(client, model: str) -> int:
-    """Return the embedding dimension for *model*.
+    """Return the embedding dimension for *model* via a sync trial embed.
 
-    Uses a lookup table for well-known Mistral models. For unknown models,
-    a sync trial embed is performed to discover the dimension.
+    Only called lazily for models not in ``_KNOWN_DIMENSIONS``.
     """
-    if model in _KNOWN_DIMENSIONS:
-        return _KNOWN_DIMENSIONS[model]
     trial = client.embeddings.create(model=model, inputs=["dim"])
     return len(trial.data[0].embedding)

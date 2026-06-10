@@ -118,11 +118,13 @@ _PARAM_MAP = {
     "milvus_uri": "milvus.uri",
     "milvus_token": "milvus.token",
     "consistency": "milvus.consistency_level",
-    "llm_provider": "compact.llm_provider",
-    "llm_model": "compact.llm_model",
-    "prompt_file": "compact.prompt_file",
-    "llm_base_url": "compact.base_url",
-    "llm_api_key": "compact.api_key",
+    # LLM flags map to [llm] (not the deprecated [compact]) so an explicit CLI
+    # flag wins over a [llm] config section in the `[llm] > [compact]` fallback.
+    "llm_provider": "llm.provider",
+    "llm_model": "llm.model",
+    "prompt_file": "prompts.compact",
+    "llm_base_url": "llm.base_url",
+    "llm_api_key": "llm.api_key",
     "max_chunk_size": "chunking.max_chunk_size",
     "overlap_lines": "chunking.overlap_lines",
     "debounce_ms": "watch.debounce_ms",
@@ -232,10 +234,12 @@ def _common_options(f):
 @click.version_option(package_name="memsearch")
 def cli() -> None:
     """memsearch — semantic memory search for markdown knowledge bases."""
-    # Windows defaults stdout to cp1252; JSON with ensure_ascii=False crashes on
-    # non-Latin-1 chars (→, smart quotes, etc.). Reconfigure to UTF-8 once here.
-    for stream in (sys.stdout, sys.stderr):
-        if stream.encoding and stream.encoding.lower() != "utf-8":
+    # Windows defaults std streams to cp1252; JSON with ensure_ascii=False crashes
+    # on non-Latin-1 chars (→, smart quotes, etc.) on output, and `summarize`'s
+    # sys.stdin.read() raises UnicodeDecodeError on UTF-8 transcripts on input.
+    # Reconfigure all three to UTF-8 once here.
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        if getattr(stream, "encoding", None) and stream.encoding.lower() != "utf-8":
             try:
                 stream.reconfigure(encoding="utf-8", errors="replace")
             except (AttributeError, OSError):
@@ -608,7 +612,7 @@ def _extract_section(
 
 
 @cli.command()
-@click.argument("paths", nargs=-1, required=True, type=click.Path(exists=True))
+@click.argument("paths", nargs=-1, required=False, type=click.Path(exists=True))
 @_common_options
 @click.option("--debounce-ms", default=None, type=click.IntRange(min=1), help="Debounce delay in ms.")
 @click.option(
@@ -620,6 +624,13 @@ def _extract_section(
     default=False,
     help="If another watcher already holds this collection, terminate it and take over "
     "(used by session hooks to reap stale watchers cross-platform). Default: refuse and exit.",
+)
+@click.option(
+    "--stop",
+    is_flag=True,
+    default=False,
+    help="Stop any running watcher for the resolved collection and exit without starting "
+    "a new one (cross-platform replacement for pgrep/kill). Exits 0 if none was running.",
 )
 def watch(
     paths: tuple[str, ...],
@@ -635,6 +646,7 @@ def watch(
     max_chunk_size: int | None,
     description: str | None,
     replace: bool,
+    stop: bool,
 ) -> None:
     """Watch PATHS for markdown changes and auto-index."""
     from .core import MemSearch
@@ -653,6 +665,28 @@ def watch(
             max_chunk_size=max_chunk_size,
         )
     )
+
+    if stop:
+        # Stop-only mode: take over the watch-domain lock exactly like --replace
+        # (terminating any live incumbent), then release it immediately. If no
+        # watcher was running, acquire succeeds instantly and this is a no-op.
+        stop_lock = WatchLock(cfg.milvus.collection, domain="watch")
+        try:
+            took_over = stop_lock.acquire(replace=True)
+        except OSError as exc:
+            click.echo(f"warning: could not establish watch lock ({exc}); cannot stop watcher.", err=True)
+            raise SystemExit(1) from None
+        if not took_over:
+            click.echo(
+                f"Could not stop the watcher holding collection '{cfg.milvus.collection}'.",
+                err=True,
+            )
+            raise SystemExit(1)
+        stop_lock.release()
+        return
+
+    if not paths:
+        raise click.UsageError("Missing argument 'PATHS...'.")
 
     # Single-writer guard for the `watch` domain: two watchers on one collection
     # produce duplicate chunks. Acquire before opening Milvus / loading the

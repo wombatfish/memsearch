@@ -40,7 +40,10 @@ class OpenAIEmbedding:
 
         self._client = openai.AsyncOpenAI(**kwargs)  # reads OPENAI_API_KEY if not provided
         self._model = model
-        self._dimension = _detect_dimension(model, kwargs)
+        self._client_kwargs = kwargs
+        # Known models resolve from the table; unknown models defer the trial
+        # embed until the dimension is first needed (no network at construction).
+        self._dimension: int | None = _KNOWN_DIMENSIONS.get(model)
         self._batch_size = batch_size if batch_size > 0 else self._DEFAULT_BATCH_SIZE
 
     @property
@@ -49,6 +52,8 @@ class OpenAIEmbedding:
 
     @property
     def dimension(self) -> int:
+        if self._dimension is None:
+            self._dimension = _detect_dimension(self._model, self._client_kwargs)
         return self._dimension
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
@@ -69,13 +74,11 @@ _KNOWN_DIMENSIONS: dict[str, int] = {
 
 
 def _detect_dimension(model: str, client_kwargs: dict) -> int:
-    """Return the embedding dimension for *model*.
+    """Return the embedding dimension for *model* via a trial embed.
 
-    Uses a lookup table for well-known OpenAI models.  For unknown models
-    (e.g. custom models via OPENAI_BASE_URL), a trial embed is performed.
+    Only called lazily for models not in ``_KNOWN_DIMENSIONS``
+    (e.g. custom models via OPENAI_BASE_URL).
     """
-    if model in _KNOWN_DIMENSIONS:
-        return _KNOWN_DIMENSIONS[model]
     import openai
 
     sync_client = openai.OpenAI(**client_kwargs)

@@ -36,12 +36,16 @@ def test_build_cli_overrides_maps_only_non_none_values() -> None:
             "collection": "custom_chunks",
             "uri": "http://localhost:19530",
         },
-        "compact": {
-            "llm_provider": "gemini",
-            "llm_model": "gemini-3-flash-preview",
-            "prompt_file": "prompts/compact.txt",
+        # LLM flags map to [llm]/[prompts] (not deprecated [compact]) so explicit
+        # CLI flags win over a [llm] config section.
+        "llm": {
+            "provider": "gemini",
+            "model": "gemini-3-flash-preview",
             "base_url": "https://llm.example.com",
             "api_key": "env:LLM_KEY",
+        },
+        "prompts": {
+            "compact": "prompts/compact.txt",
         },
         "chunking": {
             "max_chunk_size": 2048,

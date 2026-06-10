@@ -51,6 +51,32 @@ def test_search_help_mentions_consistency() -> None:
     assert "--consistency" in result.output
 
 
+def test_cli_group_reconfigures_all_std_streams_to_utf8(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The group callback must reconfigure stdin as well as stdout/stderr —
+    `summarize` reads UTF-8 transcripts from stdin, which decodes as cp1252
+    on Windows without this (silent Stop-hook summary loss)."""
+    import sys
+
+    class FakeStream:
+        encoding = "cp1252"
+
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def reconfigure(self, **kwargs) -> None:
+            self.calls.append(kwargs)
+
+    fake_in, fake_out, fake_err = FakeStream(), FakeStream(), FakeStream()
+    monkeypatch.setattr(sys, "stdin", fake_in)
+    monkeypatch.setattr(sys, "stdout", fake_out)
+    monkeypatch.setattr(sys, "stderr", fake_err)
+
+    cli.callback()
+
+    for fake in (fake_in, fake_out, fake_err):
+        assert fake.calls == [{"encoding": "utf-8", "errors": "replace"}]
+
+
 def test_search_consistency_flag_reaches_constructor(monkeypatch: pytest.MonkeyPatch) -> None:
     """`--consistency strong` must arrive as the MemSearch consistency_level kwarg."""
     captured: dict = {}

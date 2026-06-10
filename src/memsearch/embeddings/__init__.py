@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Protocol, runtime_checkable
+
+logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -104,6 +107,18 @@ def get_provider(
             kwargs["api_key"] = api_key
     elif name in ("jina", "mistral") and api_key:
         kwargs["api_key"] = api_key
+    # Warn when configured credentials are silently dropped for providers that
+    # don't accept them (they use their own env-var/SDK auth instead).
+    if base_url and name != "openai":
+        logger.warning(
+            "embedding.base_url is configured but ignored: provider %r does not accept a base URL override", name
+        )
+    if api_key and name not in ("openai", "jina", "mistral"):
+        logger.warning(
+            "embedding.api_key is configured but ignored: provider %r does not accept an API key override "
+            "(it uses its own environment-variable auth)",
+            name,
+        )
     return cls(**kwargs)
 
 

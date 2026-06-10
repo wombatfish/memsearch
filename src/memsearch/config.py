@@ -398,11 +398,13 @@ def resolve_config(cli_overrides: dict[str, Any] | None = None) -> MemSearchConf
     if _has_legacy_compact(global_cfg, project_cfg):
         import warnings
 
+        # UserWarning (not DeprecationWarning): DeprecationWarning is filtered out
+        # by default, so CLI users would never see it. UserWarning prints to stderr.
         warnings.warn(
             "[compact] config section is deprecated. "
             "Move LLM settings to [llm] and prompt settings to [prompts]. "
             "See https://memsearch.dev/configuration for details.",
-            DeprecationWarning,
+            UserWarning,
             stacklevel=2,
         )
 

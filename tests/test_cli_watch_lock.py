@@ -211,6 +211,98 @@ def test_index_replace_takes_over_stuck_index(tmp_path, monkeypatch):
             proc.kill()
 
 
+def test_replace_reprobes_before_terminating(monkeypatch):
+    """If the holder exits between the failed probe and the takeover, --replace
+    must re-acquire via a second probe WITHOUT terminating the recorded PID
+    (which could by then belong to a recycled, unrelated process)."""
+    import memsearch.watchlock as wl
+
+    real_try_lock = wl._try_lock
+    state = {"calls": 0}
+
+    def flaky_try_lock(fd: int) -> bool:
+        state["calls"] += 1
+        if state["calls"] == 1:
+            return False  # simulate a live holder at the first probe
+        return real_try_lock(fd)  # holder gone by the re-probe
+
+    killed: list[int] = []
+    monkeypatch.setattr(wl, "_try_lock", flaky_try_lock)
+    monkeypatch.setattr(wl, "_terminate", lambda pid: killed.append(pid))
+
+    lock = wl.WatchLock("col_reprobe")
+    # Leave a recorded PID behind, as a previous holder would.
+    lock._pid_path.write_text("123456", encoding="utf-8")
+
+    assert lock.acquire(replace=True) is True
+    assert killed == []  # re-probe succeeded -> nothing terminated
+    lock.release()
+
+
+def test_watch_stop_terminates_running_watcher(monkeypatch):
+    """`watch --stop` terminates the live watcher for the collection, leaves the
+    lock free, and never starts a new watcher (MemSearch not constructed)."""
+    from click.testing import CliRunner
+
+    import memsearch.core as core
+    from memsearch.cli import cli
+
+    def _boom(*_a, **_k):
+        raise AssertionError("MemSearch must not be constructed by watch --stop")
+
+    monkeypatch.setattr(core, "MemSearch", _boom)
+
+    col = "col_stop"
+    proc = _spawn(_HOLDER, env_extra={"TESTCOL": col, "MEMSEARCH_LOCK_DIR": os.environ["MEMSEARCH_LOCK_DIR"]})
+    try:
+        assert proc.stdout.readline().strip() == "ACQUIRED"
+        result = CliRunner().invoke(cli, ["watch", "--stop", "--collection", col])
+        assert result.exit_code == 0, result.output
+        assert result.exception is None
+        proc.wait(timeout=10)
+        assert proc.poll() is not None  # watcher terminated
+        # The lock was released again — no new watcher left holding it.
+        free = WatchLock(col)
+        assert free.acquire(replace=False) is True
+        free.release()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def test_watch_stop_exits_zero_when_no_watcher(monkeypatch):
+    """`watch --stop` with no running watcher is a silent no-op (exit 0)."""
+    from click.testing import CliRunner
+
+    import memsearch.core as core
+    from memsearch.cli import cli
+
+    def _boom(*_a, **_k):
+        raise AssertionError("MemSearch must not be constructed by watch --stop")
+
+    monkeypatch.setattr(core, "MemSearch", _boom)
+
+    result = CliRunner().invoke(cli, ["watch", "--stop", "--collection", "col_stop_idle"])
+    assert result.exit_code == 0, result.output
+    assert result.output == ""
+
+    # The lock is free afterwards.
+    free = WatchLock("col_stop_idle")
+    assert free.acquire(replace=False) is True
+    free.release()
+
+
+def test_watch_without_paths_or_stop_is_usage_error():
+    """Plain `watch` with no PATHS still errors (paths only optional for --stop)."""
+    from click.testing import CliRunner
+
+    from memsearch.cli import cli
+
+    result = CliRunner().invoke(cli, ["watch", "--collection", "col_no_paths"])
+    assert result.exit_code == 2
+    assert "PATHS" in result.output
+
+
 def test_cross_process_refuse_and_replace(tmp_path):
     """A real second process holds the lock; the parent refuses without
     --replace and, with --replace, terminates the holder and takes over."""

@@ -282,6 +282,131 @@ def test_validate_paths_rejects_windows_absolute_outside_roots(tmp_path: Path) -
     assert "outside allowed memory roots" in err
 
 
+def test_validate_paths_checks_value_of_opt_equals_args(tmp_path: Path) -> None:
+    """`--opt=value` args must not bypass root validation when the value is a path."""
+    project = tmp_path / "repo"
+    input_dir = project / ".memsearch" / "memory"
+    memsearch_dir = project / ".memsearch"
+    err = _validate_paths_in_args(
+        ["--file=C:/Users/x/.aws/credentials"],
+        [input_dir, memsearch_dir],
+        cwd=project,
+        allow_hash=False,
+    )
+    assert "outside allowed memory roots" in err
+    # Plain flags without a path value still pass.
+    assert (
+        _validate_paths_in_args(["-name", "--type=f"], [input_dir, memsearch_dir], cwd=project, allow_hash=False)
+        == ""
+    )
+
+
+def test_run_memory_command_rejects_project_files_outside_memory_roots(tmp_path: Path, monkeypatch) -> None:
+    """project_dir is no longer an allowed root: injected instructions cannot grep
+    arbitrary project files (e.g. .env) for secrets."""
+    project = tmp_path / "repo"
+    ctx = _ctx_via_runner(project, monkeypatch)
+    (project / ".env").write_text("SECRET=x\n", encoding="utf-8")
+
+    # Forward-slash paths: shlex.split() inside run_memory_command strips backslashes.
+    output = run_memory_command(f"grep SECRET {(project / '.env').as_posix()}", ctx)
+    assert "outside allowed memory roots" in output
+
+    # Paths under the memory roots are still allowed (no path-validation error).
+    output = run_memory_command(f"grep note {ctx.input_dir.as_posix()}", ctx)
+    assert "outside allowed memory roots" not in output
+
+
+def test_any_task_exception_is_isolated_per_task(tmp_path: Path) -> None:
+    """Any per-task failure (not just FileNotFoundError) yields an 'error' result
+    and does not abort sibling tasks."""
+    project = tmp_path / "repo"
+    memory = project / ".memsearch" / "memory"
+    memory.mkdir(parents=True)
+    (memory / "2026-05-27.md").write_text("- something happened\n", encoding="utf-8")
+
+    cfg = MemSearchConfig()
+    cfg.plugins.codex.project_review.enabled = True
+    cfg.plugins.codex.project_review.provider = "openai"
+    cfg.plugins.codex.corrections.enabled = True
+    cfg.plugins.codex.corrections.provider = "openai"
+
+    def fake_runner(ctx, prompt: str) -> str:
+        if ctx.task == "project_review":
+            raise ValueError("LLM exploded")
+        return json.dumps({"action": "none", "reason": "ok"})
+
+    results = run_due_tasks(platform="codex", project_dir=project, cfg=cfg, llm_runner=fake_runner)
+
+    by_task = {r.task: r for r in results}
+    assert by_task["project_review"].action == "error"
+    assert "LLM exploded" in by_task["project_review"].reason
+    # Sibling task still ran to completion.
+    assert by_task["corrections"].action == "none"
+
+
+def test_anthropic_tool_loop_enforces_max_tool_calls(monkeypatch) -> None:
+    """The Anthropic loop caps per-response tool calls like the OpenAI loop."""
+    from memsearch.maintenance import _run_anthropic_with_tools
+
+    counter = {"n": 0}
+
+    def fake_run_memory_command(command: str, ctx) -> str:
+        counter["n"] += 1
+        return "ok"
+
+    monkeypatch.setattr("memsearch.maintenance.run_memory_command", fake_run_memory_command)
+
+    def tool_use_block(i: int):
+        return types.SimpleNamespace(type="tool_use", id=f"toolu_{i}", input={"command": "x"}, text="")
+
+    responses = [
+        # One response containing more tool_use blocks than the cap allows.
+        types.SimpleNamespace(content=[tool_use_block(i) for i in range(MAX_TOOL_CALLS + 2)]),
+        types.SimpleNamespace(content=[types.SimpleNamespace(type="text", text="done")]),
+    ]
+    tool_result_batches: list[list[dict]] = []
+
+    class FakeMessages:
+        def create(self, **kwargs):
+            tool_result_batches.extend(
+                m["content"]
+                for m in kwargs.get("messages", [])
+                if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), list)
+            )
+            return responses.pop(0)
+
+    class FakeAnthropic:
+        def __init__(self, *args, **kwargs) -> None:
+            self.messages = FakeMessages()
+
+    monkeypatch.setattr("anthropic.Anthropic", FakeAnthropic)
+
+    ctx = types.SimpleNamespace()
+    provider_cfg = LLMProviderConfig(type="anthropic")
+    result = _run_anthropic_with_tools(ctx, "prompt", None, provider_cfg)
+
+    assert result == "done"
+    assert counter["n"] == MAX_TOOL_CALLS
+    over_cap = [r["content"] for r in tool_result_batches[0][MAX_TOOL_CALLS:]]
+    assert over_cap == ["Error: memory tool call limit reached"] * 2
+
+
+def test_scrub_secrets_redacts_hyphenated_openai_key_shapes() -> None:
+    """sk-proj-… and sk-ant-api03-… must be redacted (hyphen must not end the match)."""
+    proj_key = "sk-proj-" + "A" * 40
+    ant_key = "sk-ant-api03-" + "B" * 40
+    plain_key = "sk-" + "C" * 24
+    text = f"a={proj_key}\nb={ant_key}\nc={plain_key}\n"
+
+    scrubbed = _scrub_secrets(text)
+
+    assert proj_key not in scrubbed
+    assert ant_key not in scrubbed
+    assert plain_key not in scrubbed
+    assert scrubbed.count("[REDACTED]") == 3
+
+
 def test_file_lock_reclaims_stale_dead_pid(tmp_path: Path) -> None:
     lock_path = tmp_path / "stale.lock"
     lock_path.write_text("99999", encoding="utf-8")

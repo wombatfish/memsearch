@@ -118,6 +118,14 @@ class WatchLock:
             os.close(fd)
             return False
 
+        # Re-probe before terminating: the holder may have exited between the
+        # failed attempt above and now, in which case the recorded PID could
+        # already belong to a recycled, unrelated process.
+        if _try_lock(fd):
+            self._fd = fd
+            self._write_pid()
+            return True
+
         # Lock held by a live process -> the recorded PID is that live holder.
         incumbent = self._read_pid()
         if incumbent and incumbent != os.getpid():

@@ -39,7 +39,7 @@ MAX_TOOL_CALLS = 3
 # their memory journals should rotate them, not rely on this redaction.
 _SECRET_PATTERNS = (
     re.compile(r"AKIA[0-9A-Z]{16}"),  # AWS access key id
-    re.compile(r"sk-[A-Za-z0-9]{20,}"),  # OpenAI-style key
+    re.compile(r"sk-[A-Za-z0-9_-]{20,}"),  # OpenAI-style key (incl. sk-proj-…, sk-ant-api03-…)
     re.compile(r"AIza[0-9A-Za-z_\-]{35}"),  # Google API key
 )
 
@@ -163,12 +163,12 @@ def run_due_tasks(
                         output_file=str(output_file),
                     )
                 )
-            except FileNotFoundError as exc:
-                # Typically a missing prompt template (core package resource absent, or a
-                # misconfigured prompts.<task> path); on Windows a FileNotFoundError can
-                # also surface from the LLM subprocess (e.g. WinError 206). Either way it
-                # must not crash the whole run or abort sibling tasks — report it as a
-                # per-task error result and keep the exception text for diagnosis.
+            except Exception as exc:
+                # Task isolation: any per-task failure (missing prompt template, LLM/API
+                # error, invalid LLM response, Windows subprocess FileNotFoundError such
+                # as WinError 206, …) must not crash the whole run or abort sibling
+                # tasks — report it as a per-task error result and keep the exception
+                # text for diagnosis.
                 results.append(
                     MaintenanceResult(
                         task=task_name,
@@ -434,6 +434,7 @@ def _run_anthropic_with_tools(ctx: TaskContext, prompt: str, model: str | None, 
     client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
     chosen_model = model or "claude-sonnet-4-6"
+    tool_call_count = 0
     for _ in range(MAX_TOOL_CALLS):
         resp = client.messages.create(
             model=chosen_model,
@@ -449,12 +450,17 @@ def _run_anthropic_with_tools(ctx: TaskContext, prompt: str, model: str | None, 
             if getattr(block, "type", "") == "text":
                 text_parts.append(block.text)
             elif getattr(block, "type", "") == "tool_use":
-                command = str((block.input or {}).get("command", ""))
+                if tool_call_count < MAX_TOOL_CALLS:
+                    command = str((block.input or {}).get("command", ""))
+                    output = run_memory_command(command, ctx)
+                    tool_call_count += 1
+                else:
+                    output = "Error: memory tool call limit reached"
                 tool_results.append(
                     {
                         "type": "tool_result",
                         "tool_use_id": block.id,
-                        "content": run_memory_command(command, ctx),
+                        "content": output,
                     }
                 )
         if not tool_results:
@@ -526,7 +532,10 @@ def run_memory_command(command: str, ctx: TaskContext) -> str:
     if not argv:
         return "Error: empty command"
 
-    allowed_roots = [ctx.project_dir, ctx.input_dir, ctx.memsearch_dir]
+    # Deliberately excludes ctx.project_dir: the tool is a *memory* drill-down, and
+    # allowing the whole project tree would let injected instructions in journal
+    # content grep arbitrary project files (e.g. .env) for secrets.
+    allowed_roots = [ctx.input_dir, ctx.memsearch_dir]
     executable = argv[0]
     if executable == "memsearch":
         if len(argv) < 2 or argv[1] not in {"expand", "transcript"}:
@@ -552,7 +561,13 @@ def run_memory_command(command: str, ctx: TaskContext) -> str:
 
 def _validate_paths_in_args(args: list[str], allowed_roots: list[Path], *, cwd: Path, allow_hash: bool) -> str:
     for arg in args:
-        if arg.startswith("-") or arg in {"*.md", "'*.md'", '"*.md"'}:
+        if arg.startswith("-"):
+            # `--opt=value` flags can smuggle a path in the value part
+            # (e.g. --file=C:/Users/x/.aws/credentials) — validate it too.
+            _, sep, arg = arg.partition("=")
+            if not sep or not arg:
+                continue
+        if arg in {"*.md", "'*.md'", '"*.md"'}:
             continue
         if allow_hash and re.fullmatch(r"[a-fA-F0-9]{8,64}", arg):
             continue
@@ -660,10 +675,13 @@ def _pid_alive(pid: int) -> bool:
     if sys.platform == "win32":
         import ctypes
 
-        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(0x1000, False, pid)
         if not handle:
-            return False
-        ctypes.windll.kernel32.CloseHandle(handle)
+            # ERROR_ACCESS_DENIED (5): the process exists but is inaccessible
+            # (e.g. elevated). Treat as alive so its lock is not reclaimed.
+            return ctypes.get_last_error() == 5
+        kernel32.CloseHandle(handle)
         return True
     try:
         os.kill(pid, 0)
