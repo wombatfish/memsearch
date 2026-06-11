@@ -24,10 +24,20 @@ Both methods return the same shape of result; pick the one your runtime supports
 
 Steps:
 
-1. **Search**: `memsearch_search(query, top_k: 5)` — query captures the core intent of the user's question.
-2. **Evaluate**: drop chunks that are clearly irrelevant or too generic.
-3. **Expand**: `memsearch_get(chunk_hash)` for each promising result.
-4. **Deep drill (optional)**: if an expanded chunk has a session anchor (`session:`/`turn:`), call `memsearch_transcript(session_id, turn_id, context: 3)`. If only `session_id` is present, use `limit: 10`.
+1. **Rewrite**: Resolve any pronouns or shorthand ("this bug", "that file") using the surrounding conversation, producing a self-contained query string.
+
+2. **Generate variants** (up to 3 total):
+   - *Semantic*: a paraphrase of the core intent.
+   - *Keyword-heavy*: exact identifiers, file names, error strings (feeds the BM25 leg).
+   - *Temporal* (only when the question implies time — "recently", "last week", "what did I decide about X"): include date cues or session references.
+
+3. **Search**: call `memsearch_search(query, top_k: 15)` for each variant (max 3 calls). `memsearch_search` returns compact summaries — use `heading`, `date`, and `preview` fields to judge relevance without expanding.
+
+4. **Union + dedup**: merge results across variants by `chunk_hash`, keeping the highest score per hash. Chunks hit by multiple variants are preferred candidates for the next step.
+
+5. **Filter-before-expand**: from the compact summaries, pick the 3–5 most promising hashes and call `memsearch_get(chunk_hash)` for each. Do **not** use HyDE. Expand only the chosen few — do not expand every search result.
+
+6. **Deep drill (optional)**: if an expanded chunk has a session anchor (`session:`/`turn:`), call `memsearch_transcript(session_id, turn_id, context: 3)`. If only `session_id` is present, use `limit: 10`.
 
 Do **not** fall back to shelling out to the `memsearch` CLI from native mode — that bypasses the plugin's collection resolution.
 
@@ -50,23 +60,52 @@ If `MEMSEARCH_DIR` is unset and you're not in a git repo, pass the project root 
 
 Steps:
 
-1. **Search**: `memsearch search "<query>" --top-k 5 --json-output --collection "$COLL"`.
+1. **Rewrite**: Resolve any pronouns or shorthand ("this bug", "that file") using the surrounding conversation, producing a self-contained query string.
+
+2. **Generate variants** (up to 3 total):
+   - *Semantic*: a paraphrase of the core intent.
+   - *Keyword-heavy*: exact identifiers, file names, error strings (feeds the BM25 leg).
+   - *Temporal* (only when the question implies time — "recently", "last week", "what did I decide about X"): include date cues or session references.
+
+3. **Search**: for each variant run:
+   ```
+   memsearch search "<variant>" --top-k 15 --compact-output --json-output --collection "$COLL"
+   ```
+   (max 3 calls total). Each result is a compact object: `{"chunk_hash": "...", "score": 0.81, "date": "...", "source": "...", "heading": "...", "preview": "<first ~100 chars>"}`. Use `heading`, `date`, and `preview` to judge relevance without fetching full content.
    - If `memsearch` is not on PATH, fall back to `uvx --from memsearch[onnx] memsearch ...`.
-2. **Evaluate**: skip chunks that are clearly irrelevant or too generic.
-3. **Expand**: `memsearch expand <chunk_hash> --collection "$COLL"` for each relevant result.
+
+4. **Union + dedup**: merge results across variants by `chunk_hash`, keeping the highest score per hash. Chunks hit by multiple variants are preferred candidates for the next step.
+
+5. **Filter-before-expand**: from the compact summaries, pick the 3–5 most promising hashes and run:
+   ```
+   memsearch expand <chunk_hash> --query "<original user question>" --collection "$COLL"
+   ```
+   Do **not** use HyDE. Expand only the chosen few — do not expand every search result. On an "unknown option" error from `--query` (older memsearch), drop the flag: `memsearch expand <chunk_hash> --collection "$COLL"`.
    - If `expand` fails with a Milvus lock/permission error (sandboxed environments), fall back to reading the source file directly. Every result includes `source` and `start_line`/`end_line`.
-4. **Deep drill (optional)**: if an expanded chunk has a transcript anchor (HTML comment with `transcript:` / `rollout:` / `db:` + `session:` / `turn:`), read the referenced file directly — `cat` (POSIX) or `Get-Content` (PowerShell) for `.jsonl`/`.md`, or for Codex rollouts open the file at the path given in the anchor and locate the matching `session_id`/`turn_id` by string match. Anchor formats vary by source agent; the file path in the anchor is the source of truth.
+
+6. **Deep drill (optional)**: if an expanded chunk has a transcript anchor (HTML comment with `transcript:` / `rollout:` / `db:` + `session:` / `turn:`), read the referenced file directly — `cat` (POSIX) or `Get-Content` (PowerShell) for `.jsonl`/`.md`, or for Codex rollouts open the file at the path given in the anchor and locate the matching `session_id`/`turn_id` by string match. Anchor formats vary by source agent; the file path in the anchor is the source of truth.
 
 ### Fallback if `memsearch collection-name` is unavailable
 
 If `memsearch collection-name` fails with `Error: No such command 'collection-name'`, the installed `memsearch` predates this subcommand. Omit `--collection` entirely:
 
 ```
-memsearch search "<query>" --top-k 5 --json-output
+memsearch search "<variant>" --top-k 15 --compact-output --json-output
 memsearch expand <chunk_hash>
 ```
 
 This relies on `~/.memsearch/config.toml` having `[milvus] collection = ...` pinned to the active collection. If it's not pinned and search returns `[]`, ask the user to either upgrade `memsearch` or set the collection in their config.
+
+### Fallback if `--compact-output` is unavailable
+
+If `memsearch search` fails with `Error: No such option: --compact-output`, the installed `memsearch` predates this flag. Fall back to the full-content search form and reduce `--top-k` to avoid token overload:
+
+```
+memsearch search "<query>" --top-k 5 --json-output --collection "$COLL"
+memsearch expand <chunk_hash> --collection "$COLL"
+```
+
+Run one query (the best single variant) rather than all three, and evaluate relevance from the full-content results directly.
 
 ## When unsure what to search
 

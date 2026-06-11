@@ -17,20 +17,35 @@ Search for memories relevant to: $ARGUMENTS
 
 ## Steps
 
-1. **Search**: Run `memsearch search "<query>" --top-k 5 --json-output --consistency Strong --collection <collection name above>` to find relevant chunks.
+1. **Rewrite**: Resolve any pronouns or shorthand ("this bug", "that file") using the surrounding conversation, producing a self-contained query string.
+
+2. **Generate variants** (up to 3 total):
+   - *Semantic*: a paraphrase of the core intent.
+   - *Keyword-heavy*: exact identifiers, file names, error strings (feeds the BM25 leg).
+   - *Temporal* (only when the question implies time — "recently", "last week", "what did I decide about X"): include date cues or session references.
+
+3. **Search**: for each variant run (max 3 calls total):
+   ```
+   memsearch search "<variant>" --top-k 15 --compact-output --json-output --consistency Strong --collection <collection name above>
+   ```
    - If `memsearch` is not found, try `uvx memsearch` instead.
-   - Choose a search query that captures the core intent of the user's question.
    - `--consistency Strong` ensures memories written by the watcher earlier this session are immediately visible on remote Milvus (no-op on Milvus Lite).
+   - Each result is a compact object: `{"chunk_hash": "...", "score": 0.81, "date": "...", "source": "...", "heading": "...", "preview": "<first ~100 chars>"}`. Use `heading`, `date`, and `preview` to judge relevance without fetching full content.
+   - If `memsearch search` fails with `Error: No such option: --compact-output`, the installed `memsearch` predates this flag. Fall back to: `memsearch search "<query>" --top-k 5 --json-output --consistency Strong --collection <collection name above>` (one query only, full results).
 
-2. **Evaluate**: Look at the search results. Skip chunks that are clearly irrelevant or too generic.
+4. **Union + dedup**: merge results across variants by `chunk_hash`, keeping the highest score per hash. Chunks hit by multiple variants are preferred candidates for the next step.
 
-3. **Expand**: For each relevant result, run `memsearch expand <chunk_hash> --collection <collection name above>` to get the full markdown section with surrounding context.
+5. **Filter-before-expand**: from the compact summaries, pick the 3–5 most promising hashes and run:
+   ```
+   memsearch expand <chunk_hash> --query "<original user question>" --collection <collection name above>
+   ```
+   Do **not** use HyDE. Expand only the chosen few — do not expand every search result. On an "unknown option" error from `--query` (older memsearch), drop the flag: `memsearch expand <chunk_hash> --collection <collection name above>`.
 
-4. **Deep drill (optional)**: If an expanded chunk contains transcript anchors (HTML comments with session/transcript info), and the original conversation seems critical:
+6. **Deep drill (optional)**: If an expanded chunk contains transcript anchors (HTML comments with session/transcript info), and the original conversation seems critical:
    - Run `python3 "${CLAUDE_PLUGIN_ROOT}/transcript.py" <jsonl_path> --turn <uuid> --context 3` to retrieve the original conversation turns. If `python3` is missing or fails at runtime (the Windows store stub passes `command -v` but exits with "Python was not found"), rerun with `python` instead — or use `$MEMSEARCH_PYTHON` if set in the environment.
    - If the anchor format is unfamiliar (e.g. `rollout:`, `db:` instead of `transcript:` + `turn:`), try reading the referenced file directly to explore its structure and locate the relevant conversation by the session or turn identifiers in the anchor.
 
-5. **Return results**: Output a curated summary of the most relevant memories. Be concise — only include information that is genuinely useful for the user's current question.
+7. **Return results**: Output a curated summary of the most relevant memories. Be concise — only include information that is genuinely useful for the user's current question.
 
 ## When unsure what to search
 
