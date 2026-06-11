@@ -290,6 +290,16 @@ provider = "openai"
 | `prompts.project_review` | string | `""` | Custom prompt file for plugin project maintenance |
 | `prompts.user_profile` | string | `""` | Custom prompt file for plugin user-profile maintenance |
 | `prompts.corrections` | string | `""` | Custom prompt file for plugin corrections maintenance |
+| `search.recency_weight` | float | `0.3` | Time-aware re-scoring weight in `[0, 1]`; `0` disables (exact pre-change ranking) |
+| `search.recency_half_life_days` | float | `30.0` | Days for a dated chunk's recency multiplier to halve |
+| `search.max_per_source` | int | `2` | Max results kept per source file (diversity); `0` disables |
+| `search.fetch_multiplier` | int | `3` | Over-fetch factor feeding the rerank/recency/cap stages |
+| `search.log_recalls` | bool | `true` | Log every `expand` as implicit-feedback into `recall_log` (in `edges.db`) |
+
+The `[search]` knobs are **on by default** and intentionally change default ranking:
+recent daily logs outrank equally-similar older ones, and at most `max_per_source`
+results come from any one file. Undated files (`PROJECT.md`, `USER.md`) are never
+penalized. Restore exact pre-change output with `--recency-weight 0 --max-per-source 0`.
 
 ---
 
@@ -374,6 +384,9 @@ Run a semantic search query against indexed chunks. Uses [hybrid search](https:/
 | `--collection` | `-c` | `memsearch_chunks` | Milvus collection name |
 | `--milvus-uri` | | `~/.memsearch/milvus.db` | Milvus connection URI |
 | `--milvus-token` | | *(none)* | Milvus auth token |
+| `--recency-weight` | | config (`0.3`) | Time-aware re-scoring weight in `[0, 1]`; `0` disables |
+| `--max-per-source` | | config (`2`) | Max results per source file (diversity); `0` disables |
+| `--compact-output` | | `false` | Slim index-first view for filter-before-expand (see below) |
 | `--json-output` | `-j` | `false` | Output results as JSON |
 
 ### Examples
@@ -425,10 +438,33 @@ Use with a different provider (must match the one used for indexing):
 $ memsearch search "database migrations" --provider google
 ```
 
+Compact index-first view — scan many candidates cheaply, then `expand` only the
+chosen few (the *filter-before-fetch* pattern, ~10x fewer tokens than full-content
+search):
+
+```bash
+$ memsearch search "RRF fusion" --top-k 15 --compact-output --json-output
+[
+  {
+    "chunk_hash": "ab12cd34ef567890",
+    "score": 0.8123,
+    "date": "2026-06-05",
+    "source": "/home/user/.memsearch/memory/2026-06-05.md",
+    "heading": "Session 14:30",
+    "preview": "Decided to use RRF k=60 for fusion because..."
+  }
+]
+```
+
+In `--compact-output` text mode each result is one line
+(`#  chunk_hash  score  date  heading — preview`); `source` is the basename in text
+mode and the full path in `--json-output`.
+
 ### Notes
 
 - **Provider must match.** The search embedding provider and model must match whatever was used during indexing. Mixing providers will return poor results because the vector spaces are incompatible.
 - **Hybrid search.** Results are ranked using Reciprocal Rank Fusion (RRF) across both dense (cosine) and sparse (BM25) retrieval, giving you the best of semantic and keyword matching. Scores are normalized to `[0, 1]` where 1.0 means ranked #1 in all retrievers.
+- **Time-aware ranking (on by default).** After hybrid search (and reranking, if enabled), scores are multiplicatively damped by source recency (`search.recency_weight`) and capped per source file (`search.max_per_source`). Relevance still dominates — recency only breaks ties / applies a bounded staleness penalty. Disable with `--recency-weight 0 --max-per-source 0`. See the `[search]` config keys above.
 - **Content is truncated.** In the default text output, each result's content is truncated to 500 characters. Use `--json-output` to get the full content.
 
 ---
@@ -578,6 +614,7 @@ Look up a chunk by its hash in the index and return the surrounding context from
 | `CHUNK_HASH` | | *(required)* | The chunk hash (primary key) to look up |
 | `--section/--no-section` | | `--section` | Show the full heading section (default behavior) |
 | `--lines` | `-n` | *(full section)* | Instead of the full section, show N lines before and after the chunk |
+| `--query` | | *(none)* | Original search query that surfaced this chunk; logged as implicit feedback (`recall_log`, controlled by `search.log_recalls`) |
 | `--json-output` | `-j` | `false` | Output as JSON |
 | `--provider` | `-p` | `openai` | Embedding provider |
 | `--model` | `-m` | provider default | Override the embedding model |
