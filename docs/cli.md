@@ -4,7 +4,7 @@ memsearch provides a command-line interface for indexing, searching, and managin
 
 ```bash
 $ memsearch --version
-memsearch, version 0.1.3
+memsearch, version 0.4.6
 
 $ memsearch --help
 Usage: memsearch [OPTIONS] COMMAND [ARGS]...
@@ -16,15 +16,17 @@ Options:
   --help     Show this message and exit.
 
 Commands:
-  compact     Compress stored memories into a summary.
-  config      Manage memsearch configuration.
-  expand      Expand a memory chunk to show full context.
-  index       Index markdown files from PATHS.
-  reset       Drop all indexed data.
-  search      Search indexed memory for QUERY.
-  stats       Show statistics about the index.
-  transcript  View original conversation turns from a JSONL transcript.
-  watch       Watch PATHS for markdown changes and auto-index.
+  collection-name  Print the Milvus collection name derived from a project dir.
+  compact          Compress stored memories into a summary.
+  config           Manage memsearch configuration.
+  expand           Expand a memory chunk to show full context.
+  graph            Manage the chunk-relationship graph (edges sidecar).
+  index            Index markdown files from PATHS.
+  reset            Drop all indexed data.
+  search           Search indexed memory for QUERY.
+  stats            Show statistics about the index.
+  summarize        Summarize stdin using a configured LLM provider.
+  watch            Watch PATHS for markdown changes and auto-index.
 ```
 
 ## Command Summary
@@ -37,11 +39,13 @@ Commands:
 | `memsearch watch` | Monitor directories and auto-index on file changes |
 | `memsearch compact` | Compress indexed chunks into an LLM-generated summary |
 | `memsearch expand` | Progressive disclosure L2: show full section around a chunk 🔌 |
-| `memsearch transcript` | Progressive disclosure L3: view turns from a JSONL transcript 🔌 |
+| `memsearch graph` | Manage the chunk-relationship graph sidecar (`graph rebuild`) |
+| `memsearch collection-name` | Print the per-project Milvus collection name derived from a path 🔌 |
+| `memsearch summarize` | Summarize stdin via a configured LLM provider (plugin session notes) 🔌 |
 | `memsearch stats` | Display index statistics (total chunk count) |
 | `memsearch reset` | Drop all indexed data from the Milvus collection |
 
-> 🔌 Commands marked with 🔌 are designed for the [platform plugins](platforms/index.md)' progressive disclosure workflow, but work as standalone CLI tools too.
+> 🔌 Commands marked with 🔌 are used by the [platform plugins](platforms/index.md). `expand` also works as a standalone CLI tool; `collection-name`/`summarize` are plugin helpers. Progressive-disclosure L3 (transcript drill-down) is handled inside the plugins by `transcript.py`, **not** a `memsearch` subcommand.
 
 ---
 
@@ -610,7 +614,7 @@ $ memsearch compact --prompt-file ./prompts/compress.txt
 
 ## `memsearch expand`
 
-> 🔌 **Plugin command.** This command is part of the [platform plugins](platforms/index.md)' three-level progressive disclosure workflow (`search` → `expand` → `transcript`), but works as a standalone CLI tool for any memsearch index.
+> 🔌 **Plugin command.** `expand` is the L2 step of the [platform plugins](platforms/index.md)' three-level progressive disclosure workflow (`search` → `expand` → plugin `transcript.py`), but works as a standalone CLI tool for any memsearch index.
 
 Look up a chunk by its hash in the index and return the surrounding context from the original source markdown file. This is "progressive disclosure level 2" -- when a search result snippet is not enough, expand it to see the full heading section.
 
@@ -625,6 +629,7 @@ Look up a chunk by its hash in the index and return the surrounding context from
 | `--json-output` | `-j` | `false` | Output as JSON |
 | `--provider` | `-p` | `openai` | Embedding provider |
 | `--model` | `-m` | provider default | Override the embedding model |
+| `--batch-size` | | `0` | Embedding batch size (`0` = provider default) |
 | `--base-url` | | *(none)* | OpenAI-compatible API base URL |
 | `--api-key` | | *(none)* | API key for the embedding provider |
 | `--collection` | `-c` | `memsearch_chunks` | Milvus collection name |
@@ -681,79 +686,8 @@ $ memsearch expand a1b2c3d4e5f6 --json-output
 
 - **Source file must exist.** The `expand` command reads the original markdown file from disk. If the source file has been moved or deleted, the command will fail with an error.
 - **Anchor parsing.** If the expanded text contains an HTML anchor comment in the format `<!-- session:ID turn:ID transcript:PATH -->`, the command parses it and displays the session, turn, and transcript file information. This connects memory chunks to their original conversation transcripts.
+- **Progressive disclosure L3.** There is no `memsearch transcript` subcommand. To drill from the anchor into the original conversation, the platform plugins run their bundled `transcript.py` (Claude Code: `python3 "${CLAUDE_PLUGIN_ROOT}/transcript.py" <jsonl> --turn <uuid> --context 3`).
 - **Workflow: search then expand.** A typical workflow is to `search` first, note the `chunk_hash` from a result, then `expand` it to see more context.
-
----
-
-## `memsearch transcript`
-
-> 🔌 **Plugin command.** This command is part of the [platform plugins](platforms/index.md)' three-level progressive disclosure workflow (`search` → `expand` → `transcript`), but works as a standalone CLI tool for any JSONL transcript.
-
-Parse a JSONL transcript file (e.g., from Claude Code) and display conversation turns. This is "progressive disclosure level 3" -- drill all the way down from a memory chunk to the original conversation that generated it.
-
-### Options
-
-| Flag | Short | Default | Description |
-|------|-------|---------|-------------|
-| `JSONL_PATH` | | *(required)* | Path to the JSONL transcript file |
-| `--turn` | `-t` | *(show all)* | Target turn UUID (prefix match supported) |
-| `--context` | `-c` | `3` | Number of turns to show before and after the target turn |
-| `--json-output` | `-j` | `false` | Output as JSON |
-
-### Examples
-
-List all turns in a transcript:
-
-```bash
-$ memsearch transcript ./transcripts/session-abc123.jsonl
-All turns (12):
-
-  a1b2c3d4e5f6  14:23:05  Show me the Redis configuration code
-  d4e5f6a1b2c3  14:23:42  Can you add TTL support to the cache?
-  f6a1b2c3d4e5  14:25:10  Write tests for the cache module
-  ...
-```
-
-Show context around a specific turn (prefix match on UUID):
-
-```bash
-$ memsearch transcript ./transcripts/session-abc123.jsonl --turn d4e5f6
-Showing 5 turns around d4e5f6a1b2c3:
-
-[14:22:30] a1b2c3d4
-Show me the Redis configuration code
-
-**Assistant**: Here is the current Redis configuration...
-
->>> [14:23:42] d4e5f6a1
-Can you add TTL support to the cache?
-
-**Assistant**: I'll add TTL support. Here are the changes...
-  Tools: Edit(/src/cache.py), Bash(pytest tests/)
-
-[14:25:10] f6a1b2c3
-Write tests for the cache module
-```
-
-Output as JSON:
-
-```bash
-$ memsearch transcript ./transcripts/session-abc123.jsonl --turn d4e5f6 --json-output
-[
-  {
-    "uuid": "a1b2c3d4-...",
-    "timestamp": "2026-02-10T14:22:30Z",
-    "content": "Show me the Redis configuration code\n\n**Assistant**: ...",
-    "tool_calls": []
-  }
-]
-```
-
-### Notes
-
-- **UUID prefix matching.** You do not need to provide the full UUID. The first 6-8 characters are usually enough to uniquely identify a turn.
-- **The `>>>` marker** in text output highlights the target turn when using `--turn`.
-- **Three-level progressive disclosure workflow:** `search` (L1: chunk snippet) -> `expand` (L2: full section) -> `transcript` (L3: original conversation).
 
 ---
 

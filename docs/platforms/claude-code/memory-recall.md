@@ -13,7 +13,7 @@ graph TD
     SKILL["memory-recall skill<br/>(context: fork subagent)"]
     SKILL --> L1["L1: Search<br/>(memsearch search)"]
     L1 --> L2["L2: Expand<br/>(memsearch expand)"]
-    L2 --> L3["L3: Transcript drill-down<br/>(memsearch transcript)"]
+    L2 --> L3["L3: Transcript drill-down<br/>(transcript.py)"]
     L3 --> RETURN["Curated summary<br/>to main agent"]
 
     style SKILL fill:#2a3a5c,stroke:#6ba3d6,color:#a8b2c1

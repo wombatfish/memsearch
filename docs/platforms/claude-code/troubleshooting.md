@@ -101,7 +101,7 @@ memsearch expand <chunk_hash>
 
 **Trace back to original conversation:**
 ```bash
-memsearch transcript /path/to/session.jsonl --turn <uuid> --context 3
+python3 "${CLAUDE_PLUGIN_ROOT}/transcript.py" /path/to/session.jsonl --turn <uuid> --context 3
 ```
 
 ---

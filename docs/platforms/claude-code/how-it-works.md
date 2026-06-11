@@ -145,7 +145,7 @@ Step by step:
     - Agent identified selectinload as the fix and applied it to get_orders()
     - Added index on order.user_id for the new query pattern
     ```
-    These anchors enable the L2→L3 drill-down: `memsearch expand` parses them to surface the transcript path, and the memory-recall skill can then use `memsearch transcript` or `transcript.py` to read the original conversation.
+    These anchors enable the L2→L3 drill-down: `memsearch expand` parses them to surface the transcript path, and the memory-recall skill can then run the plugin's `transcript.py` to read the original conversation.
 
 6. **Re-index** -- runs `memsearch index` to ensure the new memory is immediately searchable (not just when the watcher picks up the file change).
 
