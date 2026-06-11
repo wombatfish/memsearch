@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from click.testing import CliRunner
 
-from memsearch.cli import cli
+from memsearch.cli import _compact_preview, cli
 
 
 @pytest.mark.parametrize(
@@ -95,3 +97,165 @@ def test_search_consistency_flag_reaches_constructor(monkeypatch: pytest.MonkeyP
     result = CliRunner().invoke(cli, ["search", "foo", "--consistency", "Strong"])
     assert result.exit_code == 0, result.output
     assert captured.get("consistency_level") == "Strong"
+
+
+# ----------------------------------------------------------------------
+# A2/A3/A4/A5 — new search/expand flags surface in help
+# ----------------------------------------------------------------------
+
+
+def test_search_help_mentions_new_search_flags() -> None:
+    result = CliRunner().invoke(cli, ["search", "--help"])
+    assert result.exit_code == 0
+    for flag in ("--compact-output", "--recency-weight", "--max-per-source"):
+        assert flag in result.output
+
+
+def test_expand_help_mentions_query_flag() -> None:
+    result = CliRunner().invoke(cli, ["expand", "--help"])
+    assert result.exit_code == 0
+    assert "--query" in result.output
+
+
+# ----------------------------------------------------------------------
+# A3 — _compact_preview formatter
+# ----------------------------------------------------------------------
+
+
+def test_compact_preview_skips_heading_and_comment_lines() -> None:
+    content = "## Session 14:30\n<!-- session:abc turn:def transcript:/p -->\n\nDecided to use RRF k=60."
+    assert _compact_preview(content) == "Decided to use RRF k=60."
+
+
+def test_compact_preview_truncates_to_100() -> None:
+    assert len(_compact_preview("y" * 250)) == 100
+
+
+def test_compact_preview_strips_inline_comment() -> None:
+    assert _compact_preview("hello <!-- c --> world") == "hello  world"
+
+
+def test_compact_preview_empty_when_no_body() -> None:
+    assert _compact_preview("# Title\n## Sub\n<!-- only comments -->") == ""
+
+
+# ----------------------------------------------------------------------
+# A3 — --compact-output JSON shape
+# ----------------------------------------------------------------------
+
+
+def test_search_compact_output_json_shape(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Isolate from any real ~/.memsearch config so output is pure JSON (no warnings).
+    monkeypatch.setattr("memsearch.config.GLOBAL_CONFIG_PATH", tmp_path / "g.toml")
+    monkeypatch.setattr("memsearch.config.PROJECT_CONFIG_PATH", tmp_path / "p.toml")
+
+    class FakeMS:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def search(self, *args, **kwargs):
+            return [
+                {
+                    "chunk_hash": "ab12",
+                    "score": 0.81237,
+                    "source": "/m/2026-06-05.md",
+                    "heading": "Session 14:30",
+                    "content": "<!-- anchor -->\nDecided to use RRF.",
+                }
+            ]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("memsearch.core.MemSearch", FakeMS)
+    result = CliRunner().invoke(cli, ["search", "q", "--compact-output", "--json-output"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data == [
+        {
+            "chunk_hash": "ab12",
+            "score": 0.8124,  # round(0.81237, 4)
+            "date": "2026-06-05",  # parsed from the source path
+            "source": "/m/2026-06-05.md",  # full path in JSON mode
+            "heading": "Session 14:30",
+            "preview": "Decided to use RRF.",  # anchor comment line skipped
+        }
+    ]
+
+
+# ----------------------------------------------------------------------
+# A5 — expand recall logging is best-effort (never fails the expand)
+# ----------------------------------------------------------------------
+
+
+def _fake_expand_store(md_path):
+    class FakeStore:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def query(self, *, filter_expr=""):
+            return [
+                {
+                    "source": str(md_path),
+                    "start_line": 1,
+                    "end_line": 2,
+                    "heading": "H",
+                    "heading_level": 1,
+                    "chunk_hash": "abcd",
+                }
+            ]
+
+        def close(self):
+            pass
+
+    return FakeStore
+
+
+def test_expand_recall_log_failure_is_isolated(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("memsearch.config.GLOBAL_CONFIG_PATH", tmp_path / "g.toml")
+    monkeypatch.setattr("memsearch.config.PROJECT_CONFIG_PATH", tmp_path / "p.toml")
+    md = tmp_path / "2026-06-05.md"
+    md.write_text("# H\nbody line\n", encoding="utf-8")
+
+    class FakeEdges:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def log_recall(self, *args, **kwargs):
+            raise OSError("read-only edges.db")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("memsearch.store.MilvusStore", _fake_expand_store(md))
+    monkeypatch.setattr("memsearch.edges.EdgeStore", FakeEdges)
+
+    result = CliRunner().invoke(cli, ["expand", "abcd", "--query", "what did I decide"])
+    assert result.exit_code == 0, result.output
+    assert "body line" in result.output
+
+
+def test_expand_logs_recall_with_query(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("memsearch.config.GLOBAL_CONFIG_PATH", tmp_path / "g.toml")
+    monkeypatch.setattr("memsearch.config.PROJECT_CONFIG_PATH", tmp_path / "p.toml")
+    md = tmp_path / "2026-06-05.md"
+    md.write_text("# H\nbody line\n", encoding="utf-8")
+    captured: dict = {}
+
+    class FakeEdges:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def log_recall(self, chunk_hash, *, query="", collection=""):
+            captured.update(chunk_hash=chunk_hash, query=query, collection=collection)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("memsearch.store.MilvusStore", _fake_expand_store(md))
+    monkeypatch.setattr("memsearch.edges.EdgeStore", FakeEdges)
+
+    result = CliRunner().invoke(cli, ["expand", "abcd", "--query", "what did I decide"])
+    assert result.exit_code == 0, result.output
+    assert captured["chunk_hash"] == "abcd"
+    assert captured["query"] == "what did I decide"

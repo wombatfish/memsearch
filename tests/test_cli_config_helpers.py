@@ -97,7 +97,29 @@ def test_cfg_to_memsearch_kwargs_translates_resolved_config() -> None:
         "graph_similar_top_n": 5,
         "graph_similar_threshold": 0.7,
         "graph_structural": True,
+        "recency_weight": 0.3,
+        "recency_half_life_days": 30.0,
+        "max_per_source": 2,
+        "fetch_multiplier": 3,
     }
+
+
+def test_cfg_to_memsearch_kwargs_includes_search_defaults() -> None:
+    cfg = MemSearchConfig()
+    kwargs = cli_module._cfg_to_memsearch_kwargs(cfg)
+
+    assert kwargs["recency_weight"] == 0.3
+    assert kwargs["recency_half_life_days"] == 30.0
+    assert kwargs["max_per_source"] == 2
+    assert kwargs["fetch_multiplier"] == 3
+
+
+def test_build_cli_overrides_search_flags() -> None:
+    # recency_weight / max_per_source map into the [search] section.
+    assert cli_module._build_cli_overrides(recency_weight=0.0) == {"search": {"recency_weight": 0.0}}
+    assert cli_module._build_cli_overrides(max_per_source=0) == {"search": {"max_per_source": 0}}
+    # None means "not set by the user" → no search key.
+    assert "search" not in cli_module._build_cli_overrides(recency_weight=None, max_per_source=None)
 
 
 def test_cfg_to_memsearch_kwargs_includes_graph_defaults() -> None:

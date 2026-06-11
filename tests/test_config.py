@@ -603,3 +603,71 @@ def test_graph_config_set_config_value_coercion(tmp_path: Path, monkeypatch: pyt
     assert isinstance(data["graph"]["seed_k"], int)
     assert data["graph"]["structural"] is False
     assert data["graph"]["enabled"] is True
+
+
+# ----------------------------------------------------------------------
+# [search] section (A6) — recency / per-source cap / recall-log knobs
+# ----------------------------------------------------------------------
+
+
+def test_default_search_config():
+    """SearchConfig defaults are ON (intentional default-behaviour change)."""
+    cfg = MemSearchConfig()
+    assert cfg.search.recency_weight == 0.3
+    assert cfg.search.recency_half_life_days == 30.0
+    assert cfg.search.max_per_source == 2
+    assert cfg.search.fetch_multiplier == 3
+    assert cfg.search.log_recalls is True
+
+
+def test_search_section_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A [search] TOML table resolves into SearchConfig through resolve_config."""
+    global_cfg = tmp_path / "global.toml"
+    save_config(
+        {"search": {"recency_weight": 0.0, "max_per_source": 0, "fetch_multiplier": 5, "log_recalls": False}},
+        global_cfg,
+    )
+    monkeypatch.setattr("memsearch.config.GLOBAL_CONFIG_PATH", global_cfg)
+    monkeypatch.setattr("memsearch.config.PROJECT_CONFIG_PATH", tmp_path / "nope.toml")
+
+    cfg = resolve_config()
+    assert cfg.search.recency_weight == 0.0
+    assert cfg.search.max_per_source == 0
+    assert cfg.search.fetch_multiplier == 5
+    assert cfg.search.log_recalls is False
+    # Untouched leaf keeps its default.
+    assert cfg.search.recency_half_life_days == 30.0
+
+
+def test_search_set_config_value_coercion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """set_config_value coerces search leaves: float, int, bool — without colliding
+    with the [graph] leaves that share the _FLOAT/_INT/_BOOL coercion sets."""
+    cfg_path = tmp_path / "config.toml"
+    monkeypatch.setattr("memsearch.config.GLOBAL_CONFIG_PATH", cfg_path)
+    monkeypatch.setattr("memsearch.config.PROJECT_CONFIG_PATH", tmp_path / "nope.toml")
+
+    set_config_value("search.recency_weight", "0.3")
+    set_config_value("search.recency_half_life_days", "14")
+    set_config_value("search.max_per_source", "4")
+    set_config_value("search.fetch_multiplier", "2")
+    set_config_value("search.log_recalls", "off")
+
+    data = load_config_file(cfg_path)
+    assert data["search"]["recency_weight"] == 0.3
+    assert isinstance(data["search"]["recency_weight"], float)
+    assert data["search"]["recency_half_life_days"] == 14.0
+    assert isinstance(data["search"]["recency_half_life_days"], float)
+    assert data["search"]["max_per_source"] == 4
+    assert isinstance(data["search"]["max_per_source"], int)
+    assert data["search"]["fetch_multiplier"] == 2
+    assert data["search"]["log_recalls"] is False
+
+
+def test_search_unknown_key_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Unknown [search] keys are still rejected (validation unchanged)."""
+    cfg_path = tmp_path / "config.toml"
+    monkeypatch.setattr("memsearch.config.GLOBAL_CONFIG_PATH", cfg_path)
+    monkeypatch.setattr("memsearch.config.PROJECT_CONFIG_PATH", tmp_path / "nope.toml")
+
+    with pytest.raises(KeyError):
+        set_config_value("search.bogus_field", "1")

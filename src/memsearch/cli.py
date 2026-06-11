@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ from pathlib import Path
 
 import click
 
+from .chunker import _HEADING_RE, _HTML_COMMENT_RE
 from .watchlock import WatchLock
 
 
@@ -130,6 +132,8 @@ _PARAM_MAP = {
     "debounce_ms": "watch.debounce_ms",
     "reranker_model": "reranker.model",
     "graph": "graph.enabled",
+    "recency_weight": "search.recency_weight",
+    "max_per_source": "search.max_per_source",
 }
 
 
@@ -171,6 +175,10 @@ def _cfg_to_memsearch_kwargs(cfg: MemSearchConfig) -> dict:
         "graph_similar_top_n": cfg.graph.similar_top_n,
         "graph_similar_threshold": cfg.graph.similar_threshold,
         "graph_structural": cfg.graph.structural,
+        "recency_weight": cfg.search.recency_weight,
+        "recency_half_life_days": cfg.search.recency_half_life_days,
+        "max_per_source": cfg.search.max_per_source,
+        "fetch_multiplier": cfg.search.fetch_multiplier,
     }
 
 
@@ -188,6 +196,24 @@ def _normalize_compact_source(source: str | None) -> str | None:
         return str(candidate.resolve())
 
     return source
+
+
+def _compact_preview(content: str) -> str:
+    """First meaningful content line for the compact index view (A3).
+
+    Skips blank lines, markdown headings, and HTML-comment-only lines (memsearch
+    anchor comments), then truncates to 100 chars. Reuses the chunker's regexes so
+    the notion of "heading"/"comment" matches indexing exactly.
+    """
+    for raw in content.splitlines():
+        line = raw.strip()
+        if not line or _HEADING_RE.match(line):
+            continue
+        without_comment = _HTML_COMMENT_RE.sub("", line).strip()
+        if not without_comment:
+            continue  # line was only an HTML comment (e.g. a session anchor)
+        return without_comment[:100]
+    return ""
 
 
 def _plugin_summarize_config(cfg: MemSearchConfig, plugin: str) -> dict:
@@ -358,6 +384,19 @@ def index(
     help="Remote Milvus read consistency: Strong avoids staleness so just-indexed chunks are "
     "immediately searchable. Ignored on Milvus Lite. Default: collection setting (Bounded).",
 )
+@click.option(
+    "--recency-weight",
+    default=None,
+    type=click.FloatRange(min=0.0, max=1.0),
+    help="Time-aware re-scoring weight in [0,1]. 0 disables (exact pre-change order). Default: config (0.3).",
+)
+@click.option(
+    "--max-per-source",
+    default=None,
+    type=click.IntRange(min=0),
+    help="Cap results per source file (diversity). 0 disables. Default: config (2).",
+)
+@click.option("--compact-output", is_flag=True, help="Slim index-first view (chunk_hash/score/date/heading/preview) for filter-before-expand.")
 @click.option("--json-output", "-j", is_flag=True, help="Output as JSON.")
 def search(
     query: str,
@@ -374,10 +413,13 @@ def search(
     reranker_model: str | None,
     graph: bool | None,
     consistency: str | None,
+    recency_weight: float | None,
+    max_per_source: int | None,
+    compact_output: bool,
     json_output: bool,
 ) -> None:
     """Search indexed memory for QUERY."""
-    from .core import MemSearch
+    from .core import MemSearch, _source_date
 
     cfg = _safe_resolve_config(
         _build_cli_overrides(
@@ -392,12 +434,44 @@ def search(
             reranker_model=reranker_model,
             graph=graph,
             consistency=consistency,
+            recency_weight=recency_weight,
+            max_per_source=max_per_source,
         )
     )
     ms = None
     try:
         ms = MemSearch(**_cfg_to_memsearch_kwargs(cfg))
         results = _run(ms.search(query, top_k=top_k or 5, source_prefix=source_prefix))
+        if compact_output:
+            # Index-first slim view: filter-before-fetch (claude-mem pattern). Lets a
+            # caller scan many candidates cheaply, then `expand` only the chosen few.
+            slim = []
+            for r in results:
+                src = r.get("source", "")
+                d = _source_date(src)
+                slim.append(
+                    {
+                        "chunk_hash": r.get("chunk_hash", ""),
+                        "score": round(float(r.get("score", 0.0)), 4),
+                        "date": d.isoformat() if d else "",
+                        # Full path in JSON (machine-consumable); basename in text (skim).
+                        "source": src if json_output else os.path.basename(src),
+                        "heading": r.get("heading", ""),
+                        "preview": _compact_preview(r.get("content", "")),
+                    }
+                )
+            if json_output:
+                click.echo(json.dumps(slim, indent=2, ensure_ascii=False))
+            elif not slim:
+                click.echo("No results found.")
+            else:
+                for i, s in enumerate(slim, 1):
+                    date_str = s["date"] or "          "
+                    sep = " — " if s["preview"] else ""
+                    click.echo(
+                        f"{i:2d}. {s['chunk_hash']}  {s['score']:.4f}  {date_str}  {s['heading']}{sep}{s['preview']}"
+                    )
+            return
         if json_output:
             click.echo(json.dumps(results, indent=2, ensure_ascii=False))
         else:
@@ -446,12 +520,18 @@ def search(
 @click.option(
     "--lines", "-n", default=None, type=click.IntRange(min=0), help="Show N lines before/after instead of full section."
 )
+@click.option(
+    "--query",
+    default=None,
+    help="Original search query that surfaced this chunk; logged as implicit feedback (A5).",
+)
 @click.option("--json-output", "-j", is_flag=True, help="Output as JSON.")
 @_common_options
 def expand(
     chunk_hash: str,
     section: bool,
     lines: int | None,
+    query: str | None,
     json_output: bool,
     provider: str | None,
     model: str | None,
@@ -499,6 +579,23 @@ def expand(
         if not chunks:
             click.echo(f"Chunk not found: {chunk_hash}", err=True)
             sys.exit(1)
+
+        # Implicit-feedback vote (A5): every expand is a revealed preference that an
+        # L1 hit was promising. Best-effort and fully isolated — logging must never
+        # fail an expand (unwritable edges.db, locked file, etc. are swallowed).
+        if cfg.search.log_recalls:
+            from .edges import EdgeStore
+
+            edge_store = None
+            try:
+                edge_store = EdgeStore(cfg.graph.edges_uri)
+                edge_store.log_recall(chunk_hash, query=query or "", collection=cfg.milvus.collection)
+            except Exception:
+                pass
+            finally:
+                if edge_store is not None:
+                    with contextlib.suppress(Exception):
+                        edge_store.close()
 
         chunk = chunks[0]
         source = chunk["source"]

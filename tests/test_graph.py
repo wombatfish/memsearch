@@ -337,6 +337,12 @@ def _make_search_mem(store, edges, *, graph_enabled: bool) -> MemSearch:
     m._graph_weight = 0.5
     m._graph_seed_k = 10
     m._graph_fanout = 5
+    # Post-search stages (A2 recency / A4 cap) disabled: these fixtures exercise
+    # the graph/search plumbing, not re-scoring (covered in test_recency.py).
+    m._recency_weight = 0.0
+    m._recency_half_life_days = 30.0
+    m._max_per_source = 0
+    m._fetch_multiplier = 3
     return m
 
 
@@ -490,6 +496,10 @@ async def test_search_source_prefix_escapes_wildcards_and_bounds_path():
     m._store = stub
     m._graph_enabled = False
     m._edges = None
+    m._recency_weight = 0.0
+    m._recency_half_life_days = 30.0
+    m._max_per_source = 0
+    m._fetch_multiplier = 3
 
     await m.search("q", source_prefix="/repo/docs_v1")
 
@@ -517,6 +527,10 @@ async def test_search_source_prefix_escapes_pattern_before_string_literal(tmp_pa
     m._store = stub
     m._graph_enabled = False
     m._edges = None
+    m._recency_weight = 0.0
+    m._recency_half_life_days = 30.0
+    m._max_per_source = 0
+    m._fetch_multiplier = 3
 
     await m.search("q", source_prefix=tmp_path / "pct%un_der")
 

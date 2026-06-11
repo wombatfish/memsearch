@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
+import re
 import threading
 from collections.abc import Callable
 from datetime import date
@@ -23,6 +25,100 @@ from .scanner import ScannedFile, scan_paths
 from .store import _RRF_K, MilvusStore
 
 logger = logging.getLogger(__name__)
+
+
+# Daily-log filenames are the canonical date (memory/<bucket>[/<branch>]/YYYY-MM-DD.md).
+# No timestamp exists in the Milvus schema, so the date is parsed from `source` at
+# search time — works on every existing collection with no re-index/migration.
+_DATE_IN_NAME_RE = re.compile(r"(20\d{2})-(\d{2})-(\d{2})\.md$")
+
+
+def _source_date(source: str) -> date | None:
+    """Parse the canonical date from a daily-log source path, else None.
+
+    Sources are OS-native absolute paths, so the basename is split on BOTH
+    separators (a Windows path uses ``\\``, a POSIX one ``/``). The basename must
+    be EXACTLY ``YYYY-MM-DD.md`` (fullmatch) — ``project-2026-06-11.md`` and
+    ``PROJECT.md`` are not daily logs and yield None. A syntactically valid but
+    impossible date (``2026-13-99.md``) raises ValueError in ``date()`` → None.
+    """
+    basename = re.split(r"[\\/]", source)[-1]
+    m = _DATE_IN_NAME_RE.fullmatch(basename)
+    if m is None:
+        return None
+    try:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
+
+
+def _recency_factor(d: date | None, half_life_days: float, today: date) -> float:
+    """Exponential recency multiplier in ``(0, 1]``.
+
+    Undated chunks (PROJECT.md, USER.md, evergreen notes) → 1.0: never penalized.
+    Otherwise ``exp(-ln2 * age_days / half_life_days)`` — 0d→1.0, one half-life→0.5.
+    Age is clamped to >= 0 so a future-dated file (timezone/clock skew) is treated
+    as today rather than boosted above 1.0, preserving the score∈[0,1] invariant
+    that the multiplicative damping below relies on. A non-positive half-life
+    disables decay (factor 1.0) rather than dividing by zero.
+    """
+    if d is None or half_life_days <= 0:
+        return 1.0
+    age_days = max(0, (today - d).days)
+    return math.exp(-math.log(2) * age_days / half_life_days)
+
+
+def _apply_recency(
+    results: list[dict[str, Any]],
+    *,
+    weight: float,
+    half_life_days: float,
+    today: date | None = None,
+) -> list[dict[str, Any]]:
+    """Multiplicatively damp each result's score by its recency, then re-sort desc.
+
+    ``final = max(score, 0) * ((1 - weight) + weight * recency)``.
+
+    Multiplicative (not additive): the factor stays in ``[1-weight, 1]`` so
+    relevance always dominates and recency only breaks ties / applies a bounded
+    staleness penalty — a recent-but-irrelevant chunk can never score ``weight``
+    from nothing, and a score already in ``[0, 1]`` (RRF, graph-fused, or
+    cross-encoder sigmoid) stays in ``[0, 1]``. The ``max(score, 0)`` clamp guards
+    the torch CrossEncoder path, which can emit raw negative logits: damping a
+    negative score would INVERT the penalty and boost stale chunks.
+    """
+    if not results:
+        return results
+    if today is None:
+        today = date.today()
+    rescored: list[dict[str, Any]] = []
+    for r in results:
+        recency = _recency_factor(_source_date(r.get("source", "")), half_life_days, today)
+        damped = max(r.get("score", 0.0), 0.0) * ((1.0 - weight) + weight * recency)
+        rescored.append({**r, "score": damped})
+    # Stable sort: equal scores keep their incoming (relevance) order.
+    rescored.sort(key=lambda r: r["score"], reverse=True)
+    return rescored
+
+
+def _cap_per_source(results: list[dict[str, Any]], max_per_source: int) -> list[dict[str, Any]]:
+    """Limit results per source file for diversity, preserving relevance order.
+
+    A single order-preserving pass: the first ``max_per_source`` hits from each
+    source are kept in place; over-cap hits go to an overflow list appended AFTER
+    all kept results — never dropped, so a short candidate pool still fills top_k.
+    """
+    kept: list[dict[str, Any]] = []
+    overflow: list[dict[str, Any]] = []
+    counts: dict[str, int] = {}
+    for r in results:
+        src = r.get("source", "")
+        if counts.get(src, 0) < max_per_source:
+            counts[src] = counts.get(src, 0) + 1
+            kept.append(r)
+        else:
+            overflow.append(r)
+    return kept + overflow
 
 
 def _is_section_head(content: str) -> bool:
@@ -112,6 +208,10 @@ class MemSearch:
         graph_similar_top_n: int = 5,
         graph_similar_threshold: float = 0.7,
         graph_structural: bool = True,
+        recency_weight: float = 0.3,
+        recency_half_life_days: float = 30.0,
+        max_per_source: int = 2,
+        fetch_multiplier: int = 3,
     ) -> None:
         self._paths = [str(p) for p in (paths or [])]
         self._max_chunk_size = max_chunk_size
@@ -139,6 +239,10 @@ class MemSearch:
         self._graph_similar_top_n = graph_similar_top_n
         self._graph_similar_threshold = graph_similar_threshold
         self._graph_structural = graph_structural
+        self._recency_weight = recency_weight
+        self._recency_half_life_days = recency_half_life_days
+        self._max_per_source = max_per_source
+        self._fetch_multiplier = fetch_multiplier
         self._edges = EdgeStore(graph_edges_uri) if graph_enabled else None
         self._edges_checked = False
 
@@ -404,7 +508,13 @@ class MemSearch:
             filter_expr = f'source == "{_escape_filter_value(prefix)}" or source like "{_esc_like(prefix_with_sep)}%"'
 
         embeddings = await self._embedder.embed([query])
-        fetch_k = top_k * 3 if self._reranker_model else top_k
+        # Over-fetch when any post-search stage (rerank / recency / per-source cap)
+        # can reorder or thin the candidate pool, so those stages can promote a
+        # chunk from below the store's top_k cut line. With every stage disabled
+        # (--reranker-model "" --recency-weight 0 --max-per-source 0) post_stages is
+        # False and fetch_k == top_k, reproducing exact pre-change behaviour.
+        post_stages = bool(self._reranker_model) or self._recency_weight > 0 or self._max_per_source > 0
+        fetch_k = top_k * self._fetch_multiplier if post_stages else top_k
         results = self._store.search(embeddings[0], query_text=query, top_k=fetch_k, filter_expr=filter_expr)
         if self._graph_enabled and self._edges is not None and results:
             # Latch after the FIRST check regardless of outcome: in the healthy
@@ -422,8 +532,19 @@ class MemSearch:
         if self._reranker_model and results:
             from .reranker import rerank
 
-            results = rerank(query, results, model_name=self._reranker_model, top_k=top_k)
-        return results
+            # top_k=0 (keep-all) instead of top_k so the recency/cap stages below can
+            # still promote a chunk the cross-encoder ranked beneath the cut line.
+            results = rerank(query, results, model_name=self._reranker_model, top_k=0)
+        if self._recency_weight > 0 and results:
+            # After rerank: the cross-encoder overwrites scores, so recency must
+            # follow it. (Graph fusion is rank-based, so pre-fusion recency damping
+            # would be a no-op — hence post-fusion too.)
+            results = _apply_recency(
+                results, weight=self._recency_weight, half_life_days=self._recency_half_life_days
+            )
+        if self._max_per_source > 0 and results:
+            results = _cap_per_source(results, self._max_per_source)
+        return results[:top_k]
 
     def _graph_expand(
         self, base: list[dict[str, Any]], *, top_k: int, filter_expr: str
