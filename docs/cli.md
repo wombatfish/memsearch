@@ -691,6 +691,123 @@ $ memsearch expand a1b2c3d4e5f6 --json-output
 
 ---
 
+## `memsearch graph`
+
+Manage the chunk-relationship graph — an undirected edge sidecar (`edges.db`, SQLite) that links related chunks so search can expand beyond the literal hybrid-search hits. Graph-aware retrieval is **on by default** (`graph.enabled`); see the [`[graph]` config keys](#available-config-keys).
+
+Edges are built automatically during `index` in three relations:
+
+- **`sibling`** — consecutive chunks in the same file.
+- **`same_section`** — chunks under the same heading (windowed).
+- **`similar`** — cross-file nearest neighbours by embedding cosine similarity (≥ `graph.similar_threshold`).
+
+At search time the top seeds pull in their 1-hop neighbours, which are re-fused into the ranking via RRF (weighted by `graph.weight`). Disable per query with `search --no-graph`, or globally with `graph.enabled = false`.
+
+### Subcommands
+
+#### `memsearch graph rebuild`
+
+Rebuild **all** edges for a collection from already-stored chunks and embeddings — **no re-embedding**, so no embedding-provider API calls or cost. Use it to backfill edges for a collection indexed before graph mode was enabled, or after `search` prints the `graph mode on but no edges` warning.
+
+| Flag | Short | Default | Description |
+|------|-------|---------|-------------|
+| `--provider` | `-p` | `openai` | Embedding provider (only to open the collection; no embeddings are computed) |
+| `--model` | `-m` | provider default | Embedding model |
+| `--batch-size` | | `0` | Embedding batch size (`0` = provider default) |
+| `--base-url` | | *(none)* | OpenAI-compatible API base URL |
+| `--api-key` | | *(none)* | API key for the embedding provider |
+| `--collection` | `-c` | `memsearch_chunks` | Milvus collection name |
+| `--milvus-uri` | | `~/.memsearch/milvus.db` | Milvus connection URI |
+| `--milvus-token` | | *(none)* | Milvus auth token |
+| `--replace` / `--no-replace` | | `--no-replace` | Take over the index writer lock from another `index`/`rebuild` already holding it |
+
+### Examples
+
+Backfill edges for the default collection:
+
+```bash
+$ memsearch graph rebuild
+Rebuilt 4821 edges.
+```
+
+Rebuild a specific collection, taking over a stuck writer lock:
+
+```bash
+$ memsearch graph rebuild --collection team_notes --replace
+```
+
+### Notes
+
+- **No re-embedding.** `rebuild` reads stored vectors only; it never calls the embedding provider. `--provider`/`--model` exist solely to open the collection and should still match what was used at index time.
+- **Single-writer lock.** `rebuild` is a full-table swap of the edges sidecar and shares the `index` writer lock, so it is serialised against `memsearch index` (but not against `watch`). It refuses to run if another index/rebuild holds the lock — use `--replace` to take over.
+- **Atomic + collection-scoped.** The swap is one transaction scoped to the collection's own chunk hashes: concurrent readers never observe an empty graph, and other collections sharing the single `edges.db` are untouched.
+
+---
+
+## `memsearch collection-name`
+
+> 🔌 **Plugin helper.** Used by the platform plugins' skills to resolve a project's collection name without shelling out to `bash` (which on Windows may dispatch to WSL and lose access to Windows paths/PATH).
+
+Print the per-project Milvus collection name derived from a directory path (defaults to the current directory). The plugins isolate each project's memory in its own collection; this command is the single source of truth for that name and mirrors `plugins/*/scripts/derive-collection.sh`, so the bash hooks and the Python skills always target the same collection. The derived name is `ms_<sanitized-basename>_<8-hex-hash-of-the-canonical-path>`.
+
+### Options
+
+Takes a single optional `PATH` argument (the project directory); with none, uses the current working directory. No other options.
+
+### Examples
+
+```bash
+$ memsearch collection-name /home/user/projects/notes
+ms_notes_c486aeb4
+
+$ memsearch collection-name          # uses the current directory
+ms_memsearch_4245a118
+```
+
+Resolve once and reuse, as the memory-recall skill does:
+
+```bash
+$ COLL=$(memsearch collection-name "$MEMSEARCH_DIR")
+$ memsearch search "auth flow" --collection "$COLL"
+```
+
+### Notes
+
+- **Pure function.** Same input path → same output, no side effects. The path is canonicalised (`.`/`..` collapsed, forward-slashed) before hashing, so equivalent spellings of one directory derive the same name.
+- **Hash-stable by contract.** The output must stay byte-identical to `derive-collection.sh`; changing the derivation would orphan every existing index, so it is guarded by golden tests.
+
+---
+
+## `memsearch summarize`
+
+> 🔌 **Plugin helper.** Invoked by the platform plugins' `Stop` hooks to turn a session transcript (piped on **stdin**) into third-person notes using an LLM provider you configure — an alternative to each plugin's native summarizer.
+
+Read text from stdin and summarise it with the LLM provider routed for a given plugin platform. The summary is written to stdout.
+
+### Options
+
+| Flag | Short | Default | Description |
+|------|-------|---------|-------------|
+| `--plugin` | | *(required)* | Plugin platform: `claude-code`, `codex`, `opencode`, or `openclaw` |
+| `--agent-name` | | `""` | Agent display name substituted into the prompt's `{{AGENT_NAME}}` placeholder |
+
+### Examples
+
+```bash
+$ cat transcript.txt | memsearch summarize --plugin claude-code --agent-name "Claude"
+- User asked about N+1 queries; the agent applied selectinload and added an index.
+- Decided to keep the index sidecar single-file across collections.
+```
+
+### Notes
+
+- **Opt-in per platform.** Routing comes from `plugins.<platform>.summarize.provider`. If it is empty or `native`, the command exits with status **2** and prints a notice — the plugin keeps its own native summarizer. Set a named provider to enable memsearch-managed summarization.
+- **Provider must be defined.** The selected provider name must exist under `[llm.providers.<name>]` (`type`/`model`/`base_url`/`api_key`). An unknown provider exits **1**.
+- **Prompt template.** Uses `prompts.summarize` when set (with `{{AGENT_NAME}}` substituted), otherwise a built-in third-person note-taker prompt.
+- **Empty stdin** produces no output and exits 0.
+
+---
+
 ## `memsearch stats`
 
 Show statistics about the current index, including the total number of stored chunks.
