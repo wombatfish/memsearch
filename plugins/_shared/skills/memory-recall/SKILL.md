@@ -78,9 +78,9 @@ Steps:
 
 5. **Filter-before-expand**: from the compact summaries, pick the 3–5 most promising hashes and run:
    ```
-   memsearch expand <chunk_hash> --query "<original user question>" --collection "$COLL"
+   memsearch expand <chunk_hash> --collection "$COLL"
    ```
-   Do **not** use HyDE. Expand only the chosen few — do not expand every search result. On an "unknown option" error from `--query` (older memsearch), drop the flag: `memsearch expand <chunk_hash> --collection "$COLL"`.
+   Do **not** use HyDE. Expand only the chosen few — do not expand every search result.
    - If `expand` fails with a Milvus lock/permission error (sandboxed environments), fall back to reading the source file directly. Every result includes `source` and `start_line`/`end_line`.
 
 6. **Deep drill (optional)**: if an expanded chunk has a transcript anchor (HTML comment with `transcript:` / `rollout:` / `db:` + `session:` / `turn:`), read the referenced file directly — `cat` (POSIX) or `Get-Content` (PowerShell) for `.jsonl`/`.md`, or for Codex rollouts open the file at the path given in the anchor and locate the matching `session_id`/`turn_id` by string match. Anchor formats vary by source agent; the file path in the anchor is the source of truth.

@@ -27,7 +27,7 @@ PROJECT_CONFIG_PATH = Path(".memsearch.toml")
 
 # Fields that should be parsed as int when set via CLI strings
 _INT_FIELDS = {"max_chunk_size", "overlap_lines", "debounce_ms", "batch_size", "min_interval_hours", "seed_k", "fanout", "similar_top_n", "max_per_source", "fetch_multiplier"}
-_BOOL_FIELDS = {"enabled", "structural", "log_recalls"}
+_BOOL_FIELDS = {"enabled", "structural"}
 _FLOAT_FIELDS = {"weight", "similar_threshold", "recency_weight", "recency_half_life_days"}
 
 
@@ -100,7 +100,6 @@ class SearchConfig:
     recency_half_life_days: float = 30.0  # chunk relevance halves every N days
     max_per_source: int = 2              # 0 disables the per-source diversity cap (A4)
     fetch_multiplier: int = 3            # over-fetch factor feeding the post-search stages
-    log_recalls: bool = True             # log every expand as implicit feedback (A5)
 
 
 @dataclass

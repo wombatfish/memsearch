@@ -20,17 +20,6 @@ CREATE INDEX IF NOT EXISTS idx_edges_src ON chunk_edges(src_hash);
 CREATE INDEX IF NOT EXISTS idx_edges_dst ON chunk_edges(dst_hash);
 """
 
-_RECALL_DDL = """
-CREATE TABLE IF NOT EXISTS recall_log (
-    ts TEXT NOT NULL,
-    chunk_hash TEXT NOT NULL,
-    query TEXT NOT NULL DEFAULT '',
-    collection TEXT NOT NULL DEFAULT ''
-);
-CREATE INDEX IF NOT EXISTS idx_recall_hash ON recall_log(chunk_hash);
-"""
-
-
 class EdgeStore:
     """Thin SQLite wrapper for storing and querying undirected chunk edges."""
 
@@ -69,30 +58,6 @@ class EdgeStore:
             return
         with self._lock:
             self._conn.executemany("INSERT OR REPLACE INTO chunk_edges VALUES (?,?,?,?,?)", edges)
-            self._conn.commit()
-
-    def log_recall(self, chunk_hash: str, *, query: str = "", collection: str = "") -> None:
-        """Record an expand-call as an implicit-feedback vote (A5).
-
-        Lazy-creates the recall_log table on first use so EdgeStore.__init__ keeps
-        its hot-path discipline (no DDL write-lock unless chunk_edges is missing).
-        A sqlite_master probe never blocks on a writer's RESERVED lock, so the
-        existence check is safe even when another process holds a write txn.
-        UTC ISO-8601 timestamp.
-        """
-        from datetime import datetime, timezone
-
-        ts = datetime.now(timezone.utc).isoformat()
-        with self._lock:
-            exists = self._conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='recall_log'"
-            ).fetchone()
-            if exists is None:
-                self._conn.executescript(_RECALL_DDL)
-            self._conn.execute(
-                "INSERT INTO recall_log (ts, chunk_hash, query, collection) VALUES (?, ?, ?, ?)",
-                (ts, chunk_hash, query, collection),
-            )
             self._conn.commit()
 
     def neighbors(self, hashes: list[str], *, limit_per_node: int = 5) -> list[tuple[str, float, str]]:

@@ -37,9 +37,9 @@ Search for memories relevant to: $ARGUMENTS
 
 5. **Filter-before-expand**: from the compact summaries, pick the 3–5 most promising hashes and run:
    ```
-   memsearch expand <chunk_hash> --query "<original user question>" --collection <collection name above>
+   memsearch expand <chunk_hash> --collection <collection name above>
    ```
-   Do **not** use HyDE. Expand only the chosen few — do not expand every search result. On an "unknown option" error from `--query` (older memsearch), drop the flag: `memsearch expand <chunk_hash> --collection <collection name above>`.
+   Do **not** use HyDE. Expand only the chosen few — do not expand every search result.
 
 6. **Deep drill (optional)**: If an expanded chunk contains transcript anchors (HTML comments with session/transcript info), and the original conversation seems critical:
    - Run `python3 "${CLAUDE_PLUGIN_ROOT}/transcript.py" <jsonl_path> --turn <uuid> --context 3` to retrieve the original conversation turns. If `python3` is missing or fails at runtime (the Windows store stub passes `command -v` but exits with "Python was not found"), rerun with `python` instead — or use `$MEMSEARCH_PYTHON` if set in the environment.

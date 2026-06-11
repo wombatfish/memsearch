@@ -298,7 +298,6 @@ provider = "openai"
 | `search.recency_half_life_days` | float | `30.0` | Days for a dated chunk's recency multiplier to halve |
 | `search.max_per_source` | int | `2` | Max results kept per source file (diversity); `0` disables |
 | `search.fetch_multiplier` | int | `3` | Over-fetch factor feeding the rerank/recency/cap stages |
-| `search.log_recalls` | bool | `true` | Log every `expand` as implicit-feedback into `recall_log` (in `edges.db`) |
 
 The `[search]` knobs are **on by default** and intentionally change default ranking:
 recent daily logs outrank equally-similar older ones, and at most `max_per_source`
@@ -625,7 +624,6 @@ Look up a chunk by its hash in the index and return the surrounding context from
 | `CHUNK_HASH` | | *(required)* | The chunk hash (primary key) to look up |
 | `--section/--no-section` | | `--section` | Show the full heading section (default behavior) |
 | `--lines` | `-n` | *(full section)* | Instead of the full section, show N lines before and after the chunk |
-| `--query` | | *(none)* | Original search query that surfaced this chunk; logged as implicit feedback (`recall_log`, controlled by `search.log_recalls`) |
 | `--json-output` | `-j` | `false` | Output as JSON |
 | `--provider` | `-p` | `openai` | Embedding provider |
 | `--model` | `-m` | provider default | Override the embedding model |

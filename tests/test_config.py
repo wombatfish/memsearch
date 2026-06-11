@@ -606,7 +606,7 @@ def test_graph_config_set_config_value_coercion(tmp_path: Path, monkeypatch: pyt
 
 
 # ----------------------------------------------------------------------
-# [search] section (A6) — recency / per-source cap / recall-log knobs
+# [search] section (A6) — recency / per-source cap knobs
 # ----------------------------------------------------------------------
 
 
@@ -617,14 +617,13 @@ def test_default_search_config():
     assert cfg.search.recency_half_life_days == 30.0
     assert cfg.search.max_per_source == 2
     assert cfg.search.fetch_multiplier == 3
-    assert cfg.search.log_recalls is True
 
 
 def test_search_section_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A [search] TOML table resolves into SearchConfig through resolve_config."""
     global_cfg = tmp_path / "global.toml"
     save_config(
-        {"search": {"recency_weight": 0.0, "max_per_source": 0, "fetch_multiplier": 5, "log_recalls": False}},
+        {"search": {"recency_weight": 0.0, "max_per_source": 0, "fetch_multiplier": 5}},
         global_cfg,
     )
     monkeypatch.setattr("memsearch.config.GLOBAL_CONFIG_PATH", global_cfg)
@@ -634,7 +633,6 @@ def test_search_section_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert cfg.search.recency_weight == 0.0
     assert cfg.search.max_per_source == 0
     assert cfg.search.fetch_multiplier == 5
-    assert cfg.search.log_recalls is False
     # Untouched leaf keeps its default.
     assert cfg.search.recency_half_life_days == 30.0
 
@@ -650,7 +648,6 @@ def test_search_set_config_value_coercion(tmp_path: Path, monkeypatch: pytest.Mo
     set_config_value("search.recency_half_life_days", "14")
     set_config_value("search.max_per_source", "4")
     set_config_value("search.fetch_multiplier", "2")
-    set_config_value("search.log_recalls", "off")
 
     data = load_config_file(cfg_path)
     assert data["search"]["recency_weight"] == 0.3
@@ -660,7 +657,6 @@ def test_search_set_config_value_coercion(tmp_path: Path, monkeypatch: pytest.Mo
     assert data["search"]["max_per_source"] == 4
     assert isinstance(data["search"]["max_per_source"], int)
     assert data["search"]["fetch_multiplier"] == 2
-    assert data["search"]["log_recalls"] is False
 
 
 def test_search_unknown_key_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

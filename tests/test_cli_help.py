@@ -111,12 +111,6 @@ def test_search_help_mentions_new_search_flags() -> None:
         assert flag in result.output
 
 
-def test_expand_help_mentions_query_flag() -> None:
-    result = CliRunner().invoke(cli, ["expand", "--help"])
-    assert result.exit_code == 0
-    assert "--query" in result.output
-
-
 # ----------------------------------------------------------------------
 # A3 — _compact_preview formatter
 # ----------------------------------------------------------------------
@@ -181,81 +175,3 @@ def test_search_compact_output_json_shape(tmp_path, monkeypatch: pytest.MonkeyPa
             "preview": "Decided to use RRF.",  # anchor comment line skipped
         }
     ]
-
-
-# ----------------------------------------------------------------------
-# A5 — expand recall logging is best-effort (never fails the expand)
-# ----------------------------------------------------------------------
-
-
-def _fake_expand_store(md_path):
-    class FakeStore:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def query(self, *, filter_expr=""):
-            return [
-                {
-                    "source": str(md_path),
-                    "start_line": 1,
-                    "end_line": 2,
-                    "heading": "H",
-                    "heading_level": 1,
-                    "chunk_hash": "abcd",
-                }
-            ]
-
-        def close(self):
-            pass
-
-    return FakeStore
-
-
-def test_expand_recall_log_failure_is_isolated(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("memsearch.config.GLOBAL_CONFIG_PATH", tmp_path / "g.toml")
-    monkeypatch.setattr("memsearch.config.PROJECT_CONFIG_PATH", tmp_path / "p.toml")
-    md = tmp_path / "2026-06-05.md"
-    md.write_text("# H\nbody line\n", encoding="utf-8")
-
-    class FakeEdges:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def log_recall(self, *args, **kwargs):
-            raise OSError("read-only edges.db")
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr("memsearch.store.MilvusStore", _fake_expand_store(md))
-    monkeypatch.setattr("memsearch.edges.EdgeStore", FakeEdges)
-
-    result = CliRunner().invoke(cli, ["expand", "abcd", "--query", "what did I decide"])
-    assert result.exit_code == 0, result.output
-    assert "body line" in result.output
-
-
-def test_expand_logs_recall_with_query(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("memsearch.config.GLOBAL_CONFIG_PATH", tmp_path / "g.toml")
-    monkeypatch.setattr("memsearch.config.PROJECT_CONFIG_PATH", tmp_path / "p.toml")
-    md = tmp_path / "2026-06-05.md"
-    md.write_text("# H\nbody line\n", encoding="utf-8")
-    captured: dict = {}
-
-    class FakeEdges:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def log_recall(self, chunk_hash, *, query="", collection=""):
-            captured.update(chunk_hash=chunk_hash, query=query, collection=collection)
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr("memsearch.store.MilvusStore", _fake_expand_store(md))
-    monkeypatch.setattr("memsearch.edges.EdgeStore", FakeEdges)
-
-    result = CliRunner().invoke(cli, ["expand", "abcd", "--query", "what did I decide"])
-    assert result.exit_code == 0, result.output
-    assert captured["chunk_hash"] == "abcd"
-    assert captured["query"] == "what did I decide"

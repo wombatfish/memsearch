@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import hashlib
 import json
 import os
@@ -520,18 +519,12 @@ def search(
 @click.option(
     "--lines", "-n", default=None, type=click.IntRange(min=0), help="Show N lines before/after instead of full section."
 )
-@click.option(
-    "--query",
-    default=None,
-    help="Original search query that surfaced this chunk; logged as implicit feedback (A5).",
-)
 @click.option("--json-output", "-j", is_flag=True, help="Output as JSON.")
 @_common_options
 def expand(
     chunk_hash: str,
     section: bool,
     lines: int | None,
-    query: str | None,
     json_output: bool,
     provider: str | None,
     model: str | None,
@@ -579,23 +572,6 @@ def expand(
         if not chunks:
             click.echo(f"Chunk not found: {chunk_hash}", err=True)
             sys.exit(1)
-
-        # Implicit-feedback vote (A5): every expand is a revealed preference that an
-        # L1 hit was promising. Best-effort and fully isolated — logging must never
-        # fail an expand (unwritable edges.db, locked file, etc. are swallowed).
-        if cfg.search.log_recalls:
-            from .edges import EdgeStore
-
-            edge_store = None
-            try:
-                edge_store = EdgeStore(cfg.graph.edges_uri)
-                edge_store.log_recall(chunk_hash, query=query or "", collection=cfg.milvus.collection)
-            except Exception:
-                pass
-            finally:
-                if edge_store is not None:
-                    with contextlib.suppress(Exception):
-                        edge_store.close()
 
         chunk = chunks[0]
         source = chunk["source"]
