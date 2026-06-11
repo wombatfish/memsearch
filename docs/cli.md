@@ -377,13 +377,18 @@ Run a semantic search query against indexed chunks. Uses [hybrid search](https:/
 |------|-------|---------|-------------|
 | `QUERY` | | *(required)* | Natural-language search query |
 | `--top-k` | `-k` | `5` | Maximum number of results to return |
+| `--source-prefix` | | *(none)* | Only return chunks whose source path starts with this prefix (directory-scoped search) |
 | `--provider` | `-p` | `openai` | Embedding provider (must match the provider used at index time) |
 | `--model` | `-m` | provider default | Override the embedding model |
+| `--batch-size` | | `0` | Embedding batch size (`0` = provider default) |
 | `--base-url` | | *(none)* | OpenAI-compatible API base URL |
 | `--api-key` | | *(none)* | API key for the embedding provider |
 | `--collection` | `-c` | `memsearch_chunks` | Milvus collection name |
 | `--milvus-uri` | | `~/.memsearch/milvus.db` | Milvus connection URI |
 | `--milvus-token` | | *(none)* | Milvus auth token |
+| `--reranker-model` | | config (`""` = off) | Cross-encoder model for a second-stage rerank; empty string disables |
+| `--graph` / `--no-graph` | | config (on) | Enable/disable graph-aware retrieval expansion |
+| `--consistency` | | collection default (Bounded) | Remote Milvus read consistency; `Strong` avoids staleness (ignored on Milvus Lite) |
 | `--recency-weight` | | config (`0.3`) | Time-aware re-scoring weight in `[0, 1]`; `0` disables |
 | `--max-per-source` | | config (`2`) | Max results per source file (diversity); `0` disables |
 | `--compact-output` | | `false` | Slim index-first view for filter-before-expand (see below) |
@@ -464,6 +469,8 @@ mode and the full path in `--json-output`.
 
 - **Provider must match.** The search embedding provider and model must match whatever was used during indexing. Mixing providers will return poor results because the vector spaces are incompatible.
 - **Hybrid search.** Results are ranked using Reciprocal Rank Fusion (RRF) across both dense (cosine) and sparse (BM25) retrieval, giving you the best of semantic and keyword matching. Scores are normalized to `[0, 1]` where 1.0 means ranked #1 in all retrievers.
+- **Retrieval pipeline.** Hybrid candidates are optionally expanded via the chunk-relationship graph (`--graph`/`--no-graph`, on by default — run `memsearch graph rebuild` once to populate the edges sidecar) and optionally re-scored by a cross-encoder (`--reranker-model`, off by default; requires `memsearch[onnx]` or `memsearch[local]`). Time-aware re-scoring and the per-source cap run last.
+- **Directory-scoped search.** `--source-prefix /path` restricts results to chunks whose `source` is under that prefix — useful for searching one project or subtree of a shared collection.
 - **Time-aware ranking (on by default).** After hybrid search (and reranking, if enabled), scores are multiplicatively damped by source recency (`search.recency_weight`) and capped per source file (`search.max_per_source`). Relevance still dominates — recency only breaks ties / applies a bounded staleness penalty. Disable with `--recency-weight 0 --max-per-source 0`. See the `[search]` config keys above.
 - **Content is truncated.** In the default text output, each result's content is truncated to 500 characters. Use `--json-output` to get the full content.
 
