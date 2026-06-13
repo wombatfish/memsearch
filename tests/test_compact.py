@@ -149,7 +149,7 @@ async def test_summarize_text_anthropic_resolves_env_ref_api_key(monkeypatch) ->
     class FakeMessages:
         async def create(self, **kwargs):
             class _Resp:
-                content = [type("_T", (), {"text": "ant-summary"})()]
+                content = [type("_T", (), {"text": "ant-summary", "type": "text"})()]
             return _Resp()
 
     class FakeClient:
@@ -179,7 +179,7 @@ async def test_summarize_text_anthropic_no_api_key_uses_ambient(monkeypatch) -> 
     class FakeMessages:
         async def create(self, **kwargs):
             class _Resp:
-                content = [type("_T", (), {"text": "ambient-summary"})()]
+                content = [type("_T", (), {"text": "ambient-summary", "type": "text"})()]
             return _Resp()
 
     class FakeClient:
@@ -262,3 +262,29 @@ async def test_summarize_text_gemini_no_api_key_uses_ambient(monkeypatch) -> Non
 
     assert result == "ambient-gem"
     assert "api_key" not in constructor_kwargs
+
+
+@pytest.mark.asyncio
+async def test_compact_anthropic_skips_non_text_leading_block(monkeypatch) -> None:
+    """_compact_anthropic must not assume content[0] is a text block: a leading
+    non-text block (e.g. a future tool_use block) must be skipped and the text
+    block(s) returned, instead of raising AttributeError on `.text`."""
+    anthropic = pytest.importorskip("anthropic")
+
+    class FakeMessages:
+        async def create(self, **kwargs):
+            class _Resp:
+                content = [
+                    type("_Tool", (), {"type": "tool_use", "id": "t1", "input": {}})(),
+                    type("_Text", (), {"type": "text", "text": "real-summary"})(),
+                ]
+            return _Resp()
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.messages = FakeMessages()
+
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", FakeClient)
+
+    result = await compact_module.summarize_text("p", llm_provider="anthropic", api_key=None)
+    assert result == "real-summary"

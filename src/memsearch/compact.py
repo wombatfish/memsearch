@@ -133,7 +133,7 @@ async def _compact_anthropic(prompt: str, model: str, *, api_key: str | None = N
         max_tokens=4096,
         messages=[{"role": "user", "content": prompt}],
     )
-    return resp.content[0].text
+    return "\n".join(block.text for block in resp.content if getattr(block, "type", "") == "text").strip()
 
 
 async def _compact_gemini(prompt: str, model: str, *, api_key: str | None = None) -> str:
