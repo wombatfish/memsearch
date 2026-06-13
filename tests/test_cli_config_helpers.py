@@ -177,3 +177,19 @@ def test_derive_collection_name_normalizes_dot_segments() -> None:
     collection name (posixpath.normpath parity with `realpath -m`)."""
     assert cli_module._derive_collection_name("/a/b/../c") == cli_module._derive_collection_name("/a/c")
     assert cli_module._derive_collection_name("/a/./c") == cli_module._derive_collection_name("/a/c")
+
+
+def test_derive_collection_name_canonicalizes_drive_case_and_msys() -> None:
+    """Lowercase drive, uppercase drive, and the MSYS /d/ form are the SAME directory,
+    so they must derive ONE collection name (bash-hook parity). Divergence silently
+    orphans every existing Milvus index for that project."""
+    canonical = cli_module._derive_collection_name("D:/Projects/x")
+    assert canonical == "ms_x_7d70789c"
+    assert cli_module._derive_collection_name("d:/Projects/x") == canonical
+    assert cli_module._derive_collection_name("/d/Projects/x") == canonical
+
+
+def test_derive_collection_name_relative_path_uses_explicit_cwd() -> None:
+    """N10: an explicit cwd makes relative-path derivation testable without depending on
+    the process working directory."""
+    assert cli_module._derive_collection_name("proj", cwd="/work") == cli_module._derive_collection_name("/work/proj")

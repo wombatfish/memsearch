@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
@@ -18,18 +19,22 @@ from .chunker import _HEADING_RE, _HTML_COMMENT_RE
 from .watchlock import WatchLock
 
 
-def _derive_collection_name(path: str) -> str:
+def _derive_collection_name(path: str, cwd: str | None = None) -> str:
     """Compute Milvus collection name from a project directory path.
 
     Hash-equivalent with plugins/*/scripts/derive-collection.sh under MSYS bash,
     where `realpath -m` canonicalizes `C:\\X` → `C:/X` (drive-letter form, forward
     slashes). Without this equivalence, hooks (bash) and skills (Python via this
     subcommand) would target different collections for the same MEMSEARCH_DIR.
+
+    *cwd* overrides the base for resolving a relative *path* (defaults to the process
+    working directory); only needed to make relative-path derivation unit-testable.
     """
-    p = path if path else os.getcwd()
+    base = cwd if cwd is not None else os.getcwd()
+    p = path if path else base
     p = p.replace("\\", "/")
     if not (len(p) >= 2 and p[1] == ":") and not p.startswith("/"):
-        p = os.getcwd().replace("\\", "/") + "/" + p
+        p = base.replace("\\", "/") + "/" + p
     p = re.sub(r"/+", "/", p)
     if len(p) > 1 and p.endswith("/") and not p.endswith(":/"):
         p = p[:-1]
@@ -37,6 +42,14 @@ def _derive_collection_name(path: str) -> str:
     # (not os.path): on Windows os.path.normpath rewrites `/`->`\`, which would
     # change the hash of every canonical path and orphan existing indexes.
     p = posixpath.normpath(p)
+
+    # Windows drive-letter parity with derive-collection.sh: fold the MSYS `/d/...`
+    # form to `D:/...` and uppercase a lowercase drive letter, so the same directory
+    # always hashes to one collection name regardless of how the path was spelled.
+    if re.match(r"^/[A-Za-z]/", p):
+        p = p[1].upper() + ":" + p[2:]
+    if len(p) >= 2 and p[1] == ":" and p[0].islower():
+        p = p[0].upper() + p[1:]
 
     basename = p.rsplit("/", 1)[-1]
     sanitized = basename.lower()
@@ -81,6 +94,61 @@ def _safe_resolve_config(overrides: dict | None = None):
     except ConfigEnvVarError as e:
         click.echo(f"Configuration error: {e}", err=True)
         raise SystemExit(1) from None
+
+
+def _acquire_writer_lock(
+    collection: str,
+    *,
+    domain: str,
+    replace: bool,
+    lock_name: str,
+    degrade_action: str,
+    busy_msg: str,
+) -> tuple[WatchLock | None, bool]:
+    """Acquire the single-writer lock for *collection* in *domain*.
+
+    Returns ``(lock, ok)``. ``ok`` is True to proceed: either the lock is held (release
+    it when done) or a lock-infrastructure ``OSError`` degraded to running WITHOUT the
+    guard (lock is then None — the operation must never be silently skipped by an infra
+    fault). ``ok`` is False when another writer holds the lock: *busy_msg* has already
+    been emitted and the caller should stop.
+    """
+    lock: WatchLock | None = WatchLock(collection, domain=domain)
+    try:
+        acquired = lock.acquire(replace=replace)
+    except OSError as exc:
+        click.echo(
+            f"warning: could not establish {lock_name} ({exc}); {degrade_action} without the single-writer guard.",
+            err=True,
+        )
+        return None, True
+    if not acquired:
+        click.echo(busy_msg, err=True)
+        return None, False
+    return lock, True
+
+
+@contextlib.contextmanager
+def _milvus_store(cfg: MemSearchConfig):
+    """Yield an open ``MilvusStore`` for *cfg*, mapping ``MilvusException`` (from open OR
+    the with-body) to the standard friendly message + exit 1, and always closing it."""
+    from .store import MilvusStore
+
+    store = None
+    try:
+        store = MilvusStore(
+            uri=cfg.milvus.uri,
+            token=cfg.milvus.token or None,
+            collection=cfg.milvus.collection,
+            dimension=None,
+        )
+        yield store
+    except MilvusException as e:
+        click.echo(f"Milvus error (code {e.code}): {e.message}", err=True)
+        raise SystemExit(1) from None
+    finally:
+        if store is not None:
+            store.close()
 
 
 # -- Secret masking for config display --
@@ -335,19 +403,18 @@ def index(
     # The `index` domain is separate from `watch`, so this does NOT block while a
     # watcher is live. A lock-infra failure degrades to indexing without the
     # guard rather than silently skipping.
-    lock: WatchLock | None = WatchLock(cfg.milvus.collection, domain="index")
-    try:
-        acquired = lock.acquire(replace=replace)
-    except OSError as exc:
-        click.echo(f"warning: could not establish index lock ({exc}); indexing without the single-writer guard.", err=True)
-        lock = None
-        acquired = True
-    if not acquired:
-        click.echo(
+    lock, ok = _acquire_writer_lock(
+        cfg.milvus.collection,
+        domain="index",
+        replace=replace,
+        lock_name="index lock",
+        degrade_action="indexing",
+        busy_msg=(
             f"Another 'memsearch index' is already running for collection '{cfg.milvus.collection}'; "
-            f"skipping to avoid duplicate-chunk churn.",
-            err=True,
-        )
+            f"skipping to avoid duplicate-chunk churn."
+        ),
+    )
+    if not ok:
         return
 
     ms = None
@@ -546,8 +613,6 @@ def expand(
         click.echo(f"Invalid chunk hash: {chunk_hash!r}", err=True)
         sys.exit(1)
 
-    from .store import MilvusStore
-
     cfg = _safe_resolve_config(
         _build_cli_overrides(
             provider=provider,
@@ -560,23 +625,23 @@ def expand(
             milvus_token=milvus_token,
         )
     )
-    store = None
-    try:
-        store = MilvusStore(
-            uri=cfg.milvus.uri,
-            token=cfg.milvus.token or None,
-            collection=cfg.milvus.collection,
-            dimension=None,
-        )
+    with _milvus_store(cfg) as store:
         chunks = store.query(filter_expr=f'chunk_hash == "{chunk_hash}"')
         if not chunks:
             click.echo(f"Chunk not found: {chunk_hash}", err=True)
             sys.exit(1)
 
         chunk = chunks[0]
-        source = chunk["source"]
-        start_line = chunk["start_line"]
-        end_line = chunk["end_line"]
+        try:
+            source = chunk["source"]
+            start_line = chunk["start_line"]
+            end_line = chunk["end_line"]
+        except KeyError as e:
+            # Required fields can be absent on schema corruption or a concurrent delete.
+            # KeyError is NOT caught by the outer MilvusException handler, so guard it
+            # here for a friendly message instead of a raw traceback.
+            click.echo(f"Malformed chunk in database: missing field {e}", err=True)
+            sys.exit(1)
         heading = chunk.get("heading", "")
         heading_level = chunk.get("heading_level", 0)
 
@@ -585,7 +650,7 @@ def expand(
             click.echo(f"Source file not found: {source}", err=True)
             sys.exit(1)
 
-        all_lines = source_path.read_text(encoding="utf-8").splitlines()
+        all_lines = source_path.read_text(encoding="utf-8", errors="replace").splitlines()
 
         if lines is not None:
             # Show N lines before/after the chunk
@@ -640,12 +705,6 @@ def expand(
                 click.echo(f"Session: {anchor['session']}  Turn: {anchor['turn']}")
                 click.echo(f"Transcript: {anchor['transcript']}")
             click.echo(f"\n{expanded}")
-    except MilvusException as e:
-        click.echo(f"Milvus error (code {e.code}): {e.message}", err=True)
-        raise SystemExit(1) from None
-    finally:
-        if store is not None:
-            store.close()
 
 
 def _extract_section(
@@ -765,26 +824,18 @@ def watch(
     # produce duplicate chunks. Acquire before opening Milvus / loading the
     # embedder so a refusal is cheap. The OS lock auto-releases if this process
     # dies. Separate from the `index` domain, so a manual index is not blocked.
-    lock: WatchLock | None = WatchLock(cfg.milvus.collection, domain="watch")
-    try:
-        acquired = lock.acquire(replace=replace)
-    except OSError as exc:
-        # A lock-infrastructure failure (bad perms, odd HOME, full disk) must
-        # never silently stop watching — that is the very failure class this
-        # guard exists to prevent. Degrade to running without the guard.
-        click.echo(
-            f"warning: could not establish watch lock ({exc}); "
-            f"starting watcher without the single-writer guard.",
-            err=True,
-        )
-        lock = None
-        acquired = True
-    if not acquired:
-        click.echo(
+    lock, ok = _acquire_writer_lock(
+        cfg.milvus.collection,
+        domain="watch",
+        replace=replace,
+        lock_name="watch lock",
+        degrade_action="starting watcher",
+        busy_msg=(
             f"Another memsearch watch already holds collection '{cfg.milvus.collection}'; "
-            f"not starting a second watcher. Use --replace to take over.",
-            err=True,
-        )
+            f"not starting a second watcher. Use --replace to take over."
+        ),
+    )
+    if not ok:
         return
 
     ms = None
@@ -972,8 +1023,6 @@ def stats(
     milvus_token: str | None,
 ) -> None:
     """Show statistics about the index."""
-    from .store import MilvusStore
-
     cfg = _safe_resolve_config(
         _build_cli_overrides(
             collection=collection,
@@ -981,22 +1030,9 @@ def stats(
             milvus_token=milvus_token,
         )
     )
-    store = None
-    try:
-        store = MilvusStore(
-            uri=cfg.milvus.uri,
-            token=cfg.milvus.token or None,
-            collection=cfg.milvus.collection,
-            dimension=None,
-        )
+    with _milvus_store(cfg) as store:
         count = store.count()
         click.echo(f"Total indexed chunks: {count}")
-    except MilvusException as e:
-        click.echo(f"Milvus error (code {e.code}): {e.message}", err=True)
-        raise SystemExit(1) from None
-    finally:
-        if store is not None:
-            store.close()
 
 
 @cli.command()
@@ -1010,8 +1046,6 @@ def reset(
     milvus_token: str | None,
 ) -> None:
     """Drop all indexed data."""
-    from .store import MilvusStore
-
     cfg = _safe_resolve_config(
         _build_cli_overrides(
             collection=collection,
@@ -1019,22 +1053,9 @@ def reset(
             milvus_token=milvus_token,
         )
     )
-    store = None
-    try:
-        store = MilvusStore(
-            uri=cfg.milvus.uri,
-            token=cfg.milvus.token or None,
-            collection=cfg.milvus.collection,
-            dimension=None,
-        )
+    with _milvus_store(cfg) as store:
         store.drop()
         click.echo("Dropped collection.")
-    except MilvusException as e:
-        click.echo(f"Milvus error (code {e.code}): {e.message}", err=True)
-        raise SystemExit(1) from None
-    finally:
-        if store is not None:
-            store.close()
 
 
 # ======================================================================
@@ -1082,19 +1103,18 @@ def graph_rebuild(
     # so a live watcher is not blocked — concurrent watcher writes are reconciled by
     # SQLite (busy_timeout) and folded in by the next rebuild. A lock-infra failure
     # degrades to rebuilding without the guard rather than silently skipping.
-    lock: WatchLock | None = WatchLock(cfg.milvus.collection, domain="index")
-    try:
-        acquired = lock.acquire(replace=replace)
-    except OSError as exc:
-        click.echo(f"warning: could not establish index lock ({exc}); rebuilding without the single-writer guard.", err=True)
-        lock = None
-        acquired = True
-    if not acquired:
-        click.echo(
+    lock, ok = _acquire_writer_lock(
+        cfg.milvus.collection,
+        domain="index",
+        replace=replace,
+        lock_name="index lock",
+        degrade_action="rebuilding",
+        busy_msg=(
             f"Another 'memsearch index' or 'graph rebuild' is running for collection '{cfg.milvus.collection}'; "
-            f"skipping to avoid clobbering edges. Use --replace to take over.",
-            err=True,
-        )
+            f"skipping to avoid clobbering edges. Use --replace to take over."
+        ),
+    )
+    if not ok:
         return
 
     ms = None

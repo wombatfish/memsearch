@@ -126,6 +126,32 @@ def test_expand_no_section_emits_only_chunk_lines(monkeypatch, tmp_path) -> None
     assert "chunk body line" in no_section_result.output
 
 
+def test_expand_malformed_chunk_emits_friendly_error(monkeypatch) -> None:
+    """I4: a chunk missing required fields (schema corruption / concurrent deletion) must
+    produce a clear message and exit 1, not a bare KeyError traceback (KeyError is not
+    caught by the outer MilvusException handler)."""
+
+    class FakeStore:
+        def __init__(self, **_kwargs):
+            pass
+
+        def query(self, filter_expr=None):
+            return [{}]  # malformed: missing source/start_line/end_line
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cli_module, "resolve_config", lambda _overrides=None: MemSearchConfig())
+    monkeypatch.setattr(store_module, "MilvusStore", FakeStore)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["expand", "deadbeef"])
+
+    assert result.exit_code == 1
+    assert "Malformed chunk" in result.stderr
+    assert not isinstance(result.exception, KeyError)  # friendly exit, not a traceback
+
+
 def test_search_rejects_non_positive_top_k() -> None:
     """--top-k 0 violates IntRange(min=1) → parse-time usage error (exit 2)."""
     runner = CliRunner()
@@ -142,3 +168,32 @@ def test_expand_rejects_negative_lines() -> None:
     result = runner.invoke(cli, ["expand", "deadbeef", "--lines=-5"])
 
     assert result.exit_code != 0
+
+
+def test_expand_handles_non_utf8_source_file(monkeypatch, tmp_path) -> None:
+    """N1: a cp1252/Latin-1 source file (invalid UTF-8 byte) must not crash expand with
+    UnicodeDecodeError — read with errors='replace'."""
+    md = tmp_path / "doc.md"
+    md.write_bytes(b"## H\nsmart \x92quote here\nbody\n")  # 0x92 is invalid UTF-8
+
+    class FakeStore:
+        def __init__(self, **_kwargs):
+            pass
+
+        def query(self, filter_expr=None):
+            return [
+                {"chunk_hash": "deadbeef", "source": str(md), "start_line": 2,
+                 "end_line": 3, "heading": "H", "heading_level": 2}
+            ]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cli_module, "resolve_config", lambda _overrides=None: MemSearchConfig())
+    monkeypatch.setattr(store_module, "MilvusStore", FakeStore)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["expand", "deadbeef"])
+
+    assert result.exit_code == 0
+    assert not isinstance(result.exception, UnicodeDecodeError)
