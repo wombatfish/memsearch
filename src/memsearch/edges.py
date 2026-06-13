@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-import contextlib
+import logging
 import sqlite3
 import threading
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS chunk_edges (
@@ -39,8 +41,18 @@ class EdgeStore:
         # 'database is locked' (it does NOT honor busy_timeout) when a writer is
         # active — swallow it; the file converts on the next uncontended open and
         # stays WAL. (WAL is unsupported on network filesystems — edges.db is local.)
-        with contextlib.suppress(sqlite3.OperationalError):
+        try:
             self._conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError as exc:
+            logger.debug("edges.db WAL pragma not applied (left in rollback-journal mode): %s", exc)
+        else:
+            mode = self._conn.execute("PRAGMA journal_mode").fetchone()
+            if mode and str(mode[0]).lower() != "wal":
+                logger.debug(
+                    "edges.db journal mode is %r, not WAL (e.g. a network filesystem); "
+                    "reads may block a concurrent writer",
+                    mode[0],
+                )
         # Run schema DDL ONLY on first creation. `CREATE ... IF NOT EXISTS` still
         # acquires a write lock even when the objects already exist, so running it on
         # every open stalls behind the session-start indexer's write transaction (up
@@ -76,13 +88,20 @@ class EdgeStore:
         )
         with self._lock:
             rows = self._conn.execute(sql, hashes + hashes).fetchall()
-        grouped: dict[str, list[tuple[str, float]]] = {}
+        # Dedupe by (seed, neighbor) BEFORE the per-node cap. The UNION ALL above
+        # returns a reciprocal pair (a->b and b->a) twice for a seed, and a multi-
+        # relation pair once per relation; without dedup a duplicate consumes a
+        # fanout slot and suppresses a distinct lower-weight neighbor. Keep the max
+        # weight across the collapsed rows.
+        grouped: dict[str, dict[str, float]] = {}
         for neighbor, weight, seed in rows:
-            grouped.setdefault(seed, []).append((neighbor, weight))
+            bucket = grouped.setdefault(seed, {})
+            if neighbor not in bucket or weight > bucket[neighbor]:
+                bucket[neighbor] = weight
         return [
             (n, w, seed)
             for seed, nbrs in grouped.items()
-            for n, w in sorted(nbrs, key=lambda x: x[1], reverse=True)[:limit_per_node]
+            for n, w in sorted(nbrs.items(), key=lambda x: x[1], reverse=True)[:limit_per_node]
         ]
 
     def delete_by_hashes(self, hashes: list[str]) -> None:
@@ -129,7 +148,8 @@ class EdgeStore:
                 if edges:
                     self._conn.executemany("INSERT OR REPLACE INTO chunk_edges VALUES (?,?,?,?,?)", edges)
                 self._conn.commit()
-            except Exception:
+            except Exception as exc:
+                logger.warning("edges replace_all swap rolled back: %s", exc)
                 self._conn.rollback()
                 raise
 
@@ -151,7 +171,8 @@ class EdgeStore:
                 if edges:
                     self._conn.executemany("INSERT OR REPLACE INTO chunk_edges VALUES (?,?,?,?,?)", edges)
                 self._conn.commit()
-            except Exception:
+            except Exception as exc:
+                logger.warning("edges replace_structural_edges swap rolled back: %s", exc)
                 self._conn.rollback()
                 raise
 

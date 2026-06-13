@@ -198,3 +198,35 @@ def test_replace_structural_edges_rolls_back_on_failure(store):
         pass
     rows = store._conn.execute("SELECT src_hash, dst_hash, relation FROM chunk_edges").fetchall()
     assert rows == [("a", "b", "sibling")]  # prior edge survived the rolled-back swap
+
+
+def test_neighbors_dedup_reciprocal_and_multirelation(store):
+    """A reciprocal pair (a->b and b->a) must not surface the same neighbor twice and
+    consume a fanout slot — dedup by (seed, neighbor) keeping the max weight BEFORE the
+    per-node cap, so a distinct lower-weight neighbor is not suppressed."""
+    store.add_edges(
+        [
+            ("a", "b", "similar", 0.9, "m"),
+            ("b", "a", "similar", 0.8, "m"),  # reciprocal: also surfaces b for seed a
+            ("a", "c", "similar", 0.7, "m"),
+        ]
+    )
+    result = store.neighbors(["a"], limit_per_node=2)
+    assert sorted(n for n, _, _ in result) == ["b", "c"]  # b once; c not dropped
+    weights = {n: w for n, w, _ in result}
+    assert weights["b"] == 0.9  # max weight across the collapsed reciprocal rows
+
+
+def test_replace_all_rollback_logs_warning(store, caplog):
+    """A rolled-back swap must emit an observable warning — edges.py was the site of a
+    data-loss incident and silent rollbacks are undiagnosable in production."""
+    import logging
+
+    store.add_edges([("a", "b", "rel", 1.0, "m")])
+    bad = [("a", "b", "rel", 1.0, "m"), ("bad", "tuple")]  # wrong arity -> failure mid-swap
+    with caplog.at_level(logging.WARNING, logger="memsearch.edges"):
+        try:
+            store.replace_all(["a"], bad)
+        except Exception:
+            pass
+    assert any("rolled back" in r.message for r in caplog.records)
