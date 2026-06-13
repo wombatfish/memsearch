@@ -48,6 +48,17 @@ def _next_seed() -> int:
     return next(_seed)
 
 
+def _reset_seed() -> None:
+    """Reset the module-global seed/id counter so each diagram is numbered independently.
+
+    `_seed` is shared by to_full/to_shorthand/_text_el/_shape_el; without a per-diagram
+    reset, adding one element to an early diagram renumbers the seeds of every later
+    diagram, producing noisy diffs across unrelated .excalidraw files for one change.
+    """
+    global _seed
+    _seed = itertools.count(1)
+
+
 # --- spec primitives ---------------------------------------------------------
 def zone(x, y, w, h, fill, label):
     return {"k": "zone", "x": x, "y": y, "w": w, "h": h, "fill": fill, "label": label}
@@ -202,20 +213,39 @@ def _expected_text_count(spec):
     return n
 
 
+class DiagramLintError(ValueError):
+    """A generated full-format scene violated a lint invariant."""
+
+
 def lint_full(scene, spec, name):
+    # Enforce with explicit raises, NOT assert: `python -O` strips assert statements,
+    # which would turn every invariant below into a no-op and silently write a broken scene.
     raw = json.dumps(scene)
-    assert json.loads(raw), f"{name}: not valid JSON"
-    assert '"label"' not in raw, f"{name}: contains create_view-only `label` shortcut"
-    assert "cameraUpdate" not in raw, f"{name}: contains cameraUpdate pseudo-element"
+    if not json.loads(raw):
+        raise DiagramLintError(f"{name}: not valid JSON")
+    # Structural checks (inspect each element, NOT the serialized string) so a text element
+    # whose CONTENT mentions "label"/"cameraUpdate" does not false-positive.
+    for el in scene["elements"]:
+        if "label" in el:
+            raise DiagramLintError(
+                f"{name}: element {el.get('id', el.get('type', '?'))} carries a create_view-only `label` shortcut"
+            )
+        if el.get("type") == "cameraUpdate":
+            raise DiagramLintError(f"{name}: contains a cameraUpdate pseudo-element")
     req = ("fontFamily", "textAlign", "verticalAlign", "width", "height", "fontSize")
     bad_color = {"transparent", "#ffffff", "#fff", "#b0b0b0", "#999", "#999999"}
     texts = [el for el in scene["elements"] if el["type"] == "text"]
     for t in texts:
         for f in req:
-            assert f in t, f"{name}: text {t.get('text','?')!r} missing {f}"
-        assert t["strokeColor"].lower() not in bad_color, f"{name}: text {t['text']!r} has unreadable color"
+            if t.get(f) in (None, ""):  # present AND non-empty
+                raise DiagramLintError(f"{name}: text {t.get('text', '?')!r} missing/empty {f}")
+        if not str(t.get("text", "")).strip():
+            raise DiagramLintError(f"{name}: a text element has blank text")
+        if str(t.get("strokeColor", "")).lower() in bad_color:
+            raise DiagramLintError(f"{name}: text {t['text']!r} has unreadable color")
     exp = _expected_text_count(spec)
-    assert len(texts) == exp, f"{name}: text count {len(texts)} != expected {exp} (text dropped?)"
+    if len(texts) != exp:
+        raise DiagramLintError(f"{name}: text count {len(texts)} != expected {exp} (text dropped?)")
     return len(texts)
 
 
@@ -301,7 +331,7 @@ def d2_lifecycle():
           box("st6", 70, 650, 280, 56, "index --replace -> Milvus upsert", C_TEAL),
           box("p2note", 960, 560, 300, 110, "reads: transcript .jsonl\nwrites: YYYY-MM-DD.md, Milvus upsert\nguard: stop_hook_active (no recursion)", C_YELLOW, 14, dashed=True)]
     # P3
-    s += [zone(40, 760, 1240, 150, Z_ORANGE := "#ffd8a8", "3.  SessionEnd") if False else zone(40, 760, 1240, 150, "#dbe4ff", "3.  SessionEnd")]
+    s += [zone(40, 760, 1240, 150, Z_BLUE, "3.  SessionEnd")]
     s += [box("e1", 70, 800, 300, 56, "run_maintenance (bg, 24h, opt-in)", C_PURPLE, dashed=True),
           box("e2", 410, 800, 200, 56, "stop_watch", C_ORANGE),
           box("e3", 650, 800, 320, 56, "kill orphaned milvus_lite (Lite only)", C_RED),
@@ -447,6 +477,7 @@ def main():
     here.mkdir(parents=True, exist_ok=True)
     view_dir.mkdir(parents=True, exist_ok=True)
     for name, fn in DIAGRAMS:
+        _reset_seed()
         spec = fn()
         scene = to_full(spec)
         n = lint_full(scene, spec, name)
