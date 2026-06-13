@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import types
 from pathlib import Path
+
+import pytest
 
 from memsearch.config import LLMProviderConfig, MemSearchConfig
 from memsearch.maintenance import (
@@ -590,25 +593,27 @@ def test_input_digest_hashes_full_content_past_truncation_cap(tmp_path: Path) ->
     input_dir.mkdir(parents=True)
 
     journal = input_dir / "2026-05-27.md"
-    # Tail content lives PAST the per-file truncation cap used for the prompt.
-    head = "head\n"
-    tail_pos = PER_FILE_BUDGET + 100
-    journal.write_text(head + "y" * (tail_pos - len(head)) + "A", encoding="utf-8")
+    # The prompt keeps only the TAIL (last PER_FILE_BUDGET chars), so a byte near the
+    # START lives past the truncation cut and is dropped from the prompt body, while
+    # the digest still hashes the full file. total_len > PER_FILE_BUDGET guarantees
+    # index 0 falls outside the kept tail window.
+    total_len = PER_FILE_BUDGET + 100
+    journal.write_text("A" + "y" * (total_len - 1), encoding="utf-8")
 
     ctx_before = _make_ctx(project, input_dir)
     digest_before = _input_digest(input_dir)
     prompt_before = _build_prompt(ctx_before, MemSearchConfig())
 
-    # Edit one byte in the tail, past the truncation cut.
-    journal.write_text(head + "y" * (tail_pos - len(head)) + "B", encoding="utf-8")
+    # Edit one byte at the head, past (before) the truncation cut.
+    journal.write_text("B" + "y" * (total_len - 1), encoding="utf-8")
 
     digest_after = _input_digest(input_dir)
     ctx_after = _make_ctx(project, input_dir)
     prompt_after = _build_prompt(ctx_after, MemSearchConfig())
 
-    # Digest reads full content -> changes when past-cap bytes change.
+    # Digest reads full content -> changes when past-cut bytes change.
     assert digest_before != digest_after
-    # The truncated prompt body (journal section) ignored the past-cap edit.
+    # The truncated prompt body (journal section) ignored the past-cut edit.
     # Strip the digest line, which legitimately differs, before comparing.
     assert _without_digest(prompt_before, digest_before) == _without_digest(prompt_after, digest_after)
 
@@ -643,3 +648,253 @@ def test_read_recent_journals_caps_per_file_and_total(tmp_path: Path) -> None:
     # and the function stops accumulating once the total budget is reached.
     assert "x" * (PER_FILE_BUDGET + 1) not in out
     assert len(out) <= 50_000 + PER_FILE_BUDGET  # last chunk may overshoot by at most one file
+
+
+def test_read_recent_journals_keeps_newest_tail_not_oldest_head(tmp_path: Path) -> None:
+    # A single journal larger than PER_FILE_BUDGET: the oldest content (head) must be
+    # dropped and the newest content (tail) kept, since journals are chronological
+    # append-logs and recency is what matters at recall time.
+    input_dir = tmp_path / "memory"
+    input_dir.mkdir()
+    head_sentinel = "OLDEST_MORNING_TURN"
+    tail_sentinel = "NEWEST_EVENING_TURN"
+    body = head_sentinel + ("x" * (PER_FILE_BUDGET + 5_000)) + tail_sentinel
+    (input_dir / "2026-06-13.md").write_text(body, encoding="utf-8")
+
+    out = _read_recent_journals(input_dir)
+
+    assert tail_sentinel in out  # newest turns survive
+    assert head_sentinel not in out  # oldest turns are the ones dropped
+
+
+def test_gemini_tool_failure_does_not_consume_budget_slot(tmp_path: Path, monkeypatch) -> None:
+    """A tool call that RAISES must not consume a MAX_TOOL_CALLS slot: the counter
+    only advances on success, so every attempt still reaches the tool instead of
+    short-circuiting to the limit message (regression for the pre-increment bug)."""
+
+    def raising_run_memory_command(command: str, ctx) -> str:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("memsearch.maintenance.run_memory_command", raising_run_memory_command)
+
+    tool_outputs: list[str] = []
+
+    class FakeConfig:
+        def __init__(self, **kwargs) -> None:
+            self.tools = kwargs.get("tools", [])
+
+    class FakeModels:
+        def generate_content(self, model, contents, config):
+            for _ in range(MAX_TOOL_CALLS + 1):
+                tool_outputs.append(config.tools[0]("x"))
+            return types.SimpleNamespace(text="done")
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:
+            self.models = FakeModels()
+
+    monkeypatch.setattr("google.genai.Client", FakeClient)
+    monkeypatch.setattr("google.genai.types.GenerateContentConfig", FakeConfig)
+
+    ctx = types.SimpleNamespace()
+    provider_cfg = LLMProviderConfig(type="gemini")
+    result = _run_gemini_with_tools(ctx, "prompt", None, provider_cfg)
+
+    assert result == "done"
+    # Failed calls never advanced the counter, so all MAX+1 attempts reached the
+    # tool (returning its error) — none hit the "limit reached" short-circuit.
+    assert tool_outputs == ["Error: boom"] * (MAX_TOOL_CALLS + 1)
+
+
+def test_run_memory_command_bare_filename_cannot_read_project_file(tmp_path: Path, monkeypatch) -> None:
+    """C2: a bare relative filename resolves inside the memory sandbox (input_dir), not
+    the project root, so `grep PATTERN secret.txt` cannot read project/secret.txt."""
+    project = tmp_path / "repo"
+    ctx = _ctx_via_runner(project, monkeypatch)
+    (project / "secret.txt").write_text("TOPSECRET=hunter2\n", encoding="utf-8")
+    output = run_memory_command("grep TOPSECRET secret.txt", ctx)
+    assert "hunter2" not in output  # the project-root secret is unreachable
+
+
+def test_run_memory_command_find_without_path_operand_stays_in_sandbox(tmp_path: Path, monkeypatch) -> None:
+    """C3: find with no path operand defaults to the sandbox cwd (input_dir), not the
+    project root, so it cannot enumerate the project tree."""
+    project = tmp_path / "repo"
+    ctx = _ctx_via_runner(project, monkeypatch)
+    (project / "leak.py").write_text("x = 1\n", encoding="utf-8")
+    output = run_memory_command("find -name *.py", ctx)
+    assert "leak.py" not in output  # project-tree file not enumerated
+
+
+def test_run_memory_command_rejects_python3_execution(tmp_path: Path, monkeypatch) -> None:
+    """C5: a memory-root parse-transcript.py must NOT be executable as Python — the
+    data/code boundary stays closed. python3 is no longer an allowed executable."""
+    project = tmp_path / "repo"
+    ctx = _ctx_via_runner(project, monkeypatch)
+    malicious = ctx.input_dir / "parse-transcript.py"
+    malicious.write_text("print('PWNED')\n", encoding="utf-8")
+    output = run_memory_command(f"python3 {malicious.as_posix()}", ctx)
+    assert "PWNED" not in output
+    assert "not allowed" in output
+
+
+def test_run_restricted_uses_resolved_absolute_binary_not_path(tmp_path: Path, monkeypatch) -> None:
+    """C4: the executable is resolved to a trusted absolute path at module load and the
+    subprocess gets a sanitized PATH, so a poisoned PATH cannot redirect grep/find."""
+    import memsearch.maintenance as maint
+
+    fake_grep = (tmp_path / "realgrep").resolve()
+    monkeypatch.setitem(maint._RESOLVED_BINARIES, "grep", str(fake_grep))
+
+    captured: dict = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["path"] = kwargs.get("env", {}).get("PATH", "")
+        return types.SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(maint.subprocess, "run", fake_run)
+    monkeypatch.setenv("PATH", str(tmp_path / "evil"))  # poison PATH AFTER module resolution
+
+    maint._run_restricted(["grep", "x", str(tmp_path)], tmp_path)
+
+    assert captured["argv"][0] == str(fake_grep)  # absolute, module-resolved — not "grep"
+    assert str(tmp_path / "evil") not in captured["path"]  # poisoned PATH not inherited
+
+
+def test_run_restricted_scrubs_secrets_in_output(tmp_path: Path, monkeypatch) -> None:
+    """I2: tool output fed back to the LLM must be scrubbed (scrub-then-truncate)."""
+    import memsearch.maintenance as maint
+
+    monkeypatch.setitem(maint._RESOLVED_BINARIES, "grep", "/usr/bin/grep")
+    secret = "sk-" + "A" * 24
+
+    def fake_run(argv, **kwargs):
+        return types.SimpleNamespace(stdout=f"match: {secret}\n", stderr="", returncode=0)
+
+    monkeypatch.setattr(maint.subprocess, "run", fake_run)
+    out = maint._run_restricted(["grep", "x", str(tmp_path)], tmp_path)
+    assert secret not in out
+    assert "[REDACTED]" in out
+
+
+@pytest.mark.skipif(os.name != "nt", reason="backslash path survival is Windows-specific")
+def test_run_memory_command_rejects_windows_backslash_path(tmp_path: Path, monkeypatch) -> None:
+    """I1: on Windows, shlex.split(posix=False) preserves backslash paths so the validator
+    sees the real absolute path and rejects it (not a mangled, accidentally-rejected token)."""
+    project = tmp_path / "repo"
+    ctx = _ctx_via_runner(project, monkeypatch)
+    output = run_memory_command(r"grep x C:\Windows\System32\drivers\etc\hosts", ctx)
+    assert "outside allowed memory roots" in output
+
+
+def test_build_prompt_scrubs_existing_output_file(tmp_path: Path) -> None:
+    """I2: the existing output file content fed into the prompt must be scrubbed too,
+    not just the journals."""
+    project = tmp_path / "repo"
+    input_dir = project / ".memsearch" / "memory"
+    input_dir.mkdir(parents=True)
+    ctx = _make_ctx(project, input_dir)
+    ctx.output_file.parent.mkdir(parents=True, exist_ok=True)
+    secret = "AKIA" + "B" * 16
+    ctx.output_file.write_text(f"prior state\nkey={secret}\n", encoding="utf-8")
+    prompt = _build_prompt(ctx, MemSearchConfig())
+    assert secret not in prompt
+    assert "[REDACTED]" in prompt
+
+
+def test_input_digest_streaming_matches_bulk(tmp_path: Path) -> None:
+    """I14: chunk-streaming the hash must produce the same digest as a single bulk read."""
+    import hashlib
+
+    input_dir = tmp_path / "memory"
+    input_dir.mkdir()
+    content = b"line\n" * 50_000
+    (input_dir / "a.md").write_bytes(content)
+    h = hashlib.sha256()
+    h.update(b"a.md")
+    h.update(b"\0")
+    h.update(content)
+    h.update(b"\0")
+    assert _input_digest(input_dir) == f"sha256:{h.hexdigest()}"
+
+
+def test_is_due_handles_naive_timestamp_without_raising() -> None:
+    """I5: a legacy/naive last_success_at must not raise TypeError on the aware-now
+    subtraction (called before the per-task try, so it would abort the whole run)."""
+    from memsearch.maintenance import _is_due
+
+    cfg = MemSearchConfig().plugins.codex.project_review
+    state = {"last_input_digest": "old", "last_success_at": "2026-06-13T10:00:00"}  # naive, no Z
+    due, _reason = _is_due(cfg, state, "new-digest", False, Path("nonexistent"))
+    assert isinstance(due, bool)  # reached the datetime math without raising
+
+
+def test_maintenance_regenerates_deleted_output_on_unchanged_input(tmp_path: Path) -> None:
+    """I6: a deleted output file is regenerated even when the journal input digest is
+    unchanged — a digest-skip must not strand a missing output."""
+    project = tmp_path / "repo"
+    memory = project / ".memsearch" / "memory"
+    memory.mkdir(parents=True)
+    (memory / "2026-05-27.md").write_text("### 10:00\n- Stable note.\n", encoding="utf-8")
+
+    cfg = MemSearchConfig()
+    cfg.plugins.codex.project_review.enabled = True
+    calls = {"n": 0}
+
+    def fake_runner(ctx, prompt: str) -> str:
+        calls["n"] += 1
+        return json.dumps({"action": "replace", "reason": "x", "content": "# Project\n- note"})
+
+    run_due_tasks(platform="codex", project_dir=project, cfg=cfg, llm_runner=fake_runner)
+    out = project / ".memsearch" / "PROJECT.md"
+    assert calls["n"] == 1 and out.is_file()
+
+    out.unlink()  # output deleted; journals unchanged
+    run_due_tasks(platform="codex", project_dir=project, cfg=cfg, llm_runner=fake_runner)
+    assert calls["n"] == 2  # regenerated despite unchanged input
+    assert out.is_file()
+
+
+def test_file_lock_does_not_reclaim_fresh_empty_lock(tmp_path: Path) -> None:
+    """I7: an empty lock file (creator hasn't written its PID yet) must NOT be reclaimed
+    as a dead owner — doing so would delete a live lock and admit a second writer."""
+    from memsearch.maintenance import _reclaim_stale_lock
+
+    lock = tmp_path / "x.lock"
+    lock.write_text("", encoding="utf-8")  # mid-creation window
+    assert _reclaim_stale_lock(lock) is False
+    assert lock.exists()
+
+
+def test_save_state_entry_merges_not_clobbers_sibling(tmp_path: Path) -> None:
+    """I8: persisting one task's state must merge with on-disk state, not overwrite a
+    sibling task's entry written concurrently by another process."""
+    from memsearch.maintenance import _load_state, _save_state_entry
+
+    state_path = tmp_path / ".maintenance-state.json"
+    state_path.write_text(json.dumps({"codex.user_profile": {"last_action": "replace"}}), encoding="utf-8")
+    _save_state_entry(state_path, "codex.project_review", {"last_action": "none"})
+    disk = _load_state(state_path)
+    assert set(disk) == {"codex.user_profile", "codex.project_review"}
+    assert disk["codex.user_profile"]["last_action"] == "replace"
+
+
+def test_atomic_write_text_writes_lf_not_crlf(tmp_path: Path) -> None:
+    """N9: writes are LF even on Windows — no CRLF churn in committed markdown/state."""
+    from memsearch.maintenance import _atomic_write_text
+
+    target = tmp_path / "f.md"
+    _atomic_write_text(target, "a\nb\n")
+    assert target.read_bytes() == b"a\nb\n"
+
+
+def test_parse_task_response_handles_nested_braces_in_fenced_json() -> None:
+    """N4: a fenced JSON whose string value contains braces must not be truncated by a
+    non-greedy capture."""
+    from memsearch.maintenance import _parse_task_response
+
+    raw = '```json\n{"action": "replace", "reason": "x", "content": "a {b} c"}\n```'
+    data = _parse_task_response(raw)
+    assert data["action"] == "replace"
+    assert data["content"] == "a {b} c"

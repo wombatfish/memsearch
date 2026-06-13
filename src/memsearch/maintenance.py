@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import tempfile
 import time
@@ -34,6 +35,12 @@ JOURNAL_TOTAL_BUDGET = 46_000  # leaves headroom even when existing output is al
 PER_FILE_BUDGET = 8_000
 MAX_COMMAND_OUTPUT = 12_000
 MAX_TOOL_CALLS = 3
+
+# Allowed read-only executables, resolved to trusted ABSOLUTE paths at import time so a
+# later PATH change (or a `.`/repo-local shadow binary) cannot redirect them. Resolution
+# uses the trusted process PATH at startup. A None value means the tool is not installed
+# (e.g. grep/find on stock Windows) and is reported per-call rather than executed.
+_RESOLVED_BINARIES: dict[str, str | None] = {name: shutil.which(name) for name in ("memsearch", "grep", "find")}
 
 # Common secret/key formats. Best-effort only: a user with secrets committed to
 # their memory journals should rotate them, not rely on this redaction.
@@ -111,7 +118,7 @@ def run_due_tasks(
         digest = _input_digest(input_dir)
         state_key = f"{platform}.{task_name}"
         task_state = state.get(state_key, {})
-        due, reason = _is_due(task_cfg, task_state, digest, force)
+        due, reason = _is_due(task_cfg, task_state, digest, force, output_file)
         if not due:
             results.append(MaintenanceResult(task=task_name, action="skip", reason=reason, skipped=True))
             continue
@@ -147,14 +154,15 @@ def run_due_tasks(
                 else:
                     action = "none"
 
-                state[state_key] = {
+                entry = {
                     "last_checked_at": now,
                     "last_success_at": now,
                     "last_input_digest": digest,
                     "last_action": action,
                     "output_file": str(output_file),
                 }
-                _save_state(state_path, state)
+                state[state_key] = entry
+                _save_state_entry(state_path, state_key, entry)
                 results.append(
                     MaintenanceResult(
                         task=task_name,
@@ -217,23 +225,47 @@ def _input_digest(input_dir: Path) -> str:
         rel = str(path.relative_to(input_dir))
         h.update(rel.encode())
         h.update(b"\0")
-        h.update(path.read_bytes())
+        # Stream in chunks so a pathologically large .md does not spike memory on the hot
+        # scheduling path. Byte-identical digest to a single read_bytes().
+        with open(path, "rb") as f:
+            for block in iter(lambda: f.read(65536), b""):
+                h.update(block)
         h.update(b"\0")
     return f"sha256:{h.hexdigest()}"
 
 
-def _is_due(task_cfg: PluginMaintenanceTaskConfig, state: dict[str, Any], digest: str, force: bool) -> tuple[bool, str]:
+def _is_due(
+    task_cfg: PluginMaintenanceTaskConfig,
+    state: dict[str, Any],
+    digest: str,
+    force: bool,
+    output_file: Path,
+) -> tuple[bool, str]:
     if force:
         return True, "force"
-    if state.get("last_input_digest") == digest:
-        return False, "input unchanged"
     last_success = state.get("last_success_at")
+    if state.get("last_input_digest") == digest:
+        # Input unchanged → normally skip. But if a previously-WRITTEN output (last action
+        # was "replace") was deleted or emptied, regenerate it: a digest-skip must not
+        # strand a missing file. A "none" last action legitimately produced no output.
+        if (
+            last_success
+            and state.get("last_action") == "replace"
+            and not (output_file.is_file() and output_file.stat().st_size > 0)
+        ):
+            return True, "output missing"
+        return False, "input unchanged"
     if not last_success:
         return True, "never run"
     try:
         last_dt = datetime.fromisoformat(str(last_success).replace("Z", "+00:00"))
     except ValueError:
         return True, "invalid state timestamp"
+    # Normalize a legacy/naive timestamp to UTC: subtracting it from an aware now()
+    # otherwise raises TypeError, which (raised before the per-task try) would abort the
+    # WHOLE run, not just this task.
+    if last_dt.tzinfo is None:
+        last_dt = last_dt.replace(tzinfo=timezone.utc)
     age_hours = (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
     if age_hours < max(0, task_cfg.min_interval_hours):
         return False, f"not due for {task_cfg.min_interval_hours}h"
@@ -253,7 +285,7 @@ def _build_prompt(ctx: TaskContext, cfg: MemSearchConfig) -> str:
         template = template.replace(marker, value)
 
     existing = ctx.output_file.read_text(encoding="utf-8") if ctx.output_file.is_file() else ""
-    existing = existing[:EXISTING_OUTPUT_BUDGET]
+    existing = _scrub_secrets(existing)[:EXISTING_OUTPUT_BUDGET]
     journals = _read_recent_journals(ctx.input_dir, max_total_chars=JOURNAL_TOTAL_BUDGET)
     prompt = f"""{template}
 
@@ -301,8 +333,9 @@ def _read_recent_journals(
             break
         with contextlib.suppress(OSError, UnicodeDecodeError):
             # Scrub FIRST, then truncate: truncating first could split a secret
-            # token across the cut and leak its tail.
-            content = _scrub_secrets(path.read_text(encoding="utf-8"))[:PER_FILE_BUDGET]
+            # token across the cut and leak its tail. Keep the TAIL (newest turns) —
+            # journals are chronological append-logs, so the latest content is at the end.
+            content = _scrub_secrets(path.read_text(encoding="utf-8"))[-PER_FILE_BUDGET:]
             chunk = f"\n<!-- source:{path} -->\n{content}"
             chunks.append(chunk)
             total += len(chunk)
@@ -501,8 +534,16 @@ def _run_gemini_with_tools(ctx: TaskContext, prompt: str, model: str | None, pro
         """Run a restricted read-only memsearch memory drill-down command."""
         if calls["n"] >= MAX_TOOL_CALLS:
             return "Error: memory tool call limit reached"
+        # Count the slot only after a successful call: a tool that raises must not
+        # consume a budget slot (parity with the OpenAI/Anthropic runners, which
+        # increment after the call returns). Catch so a raising tool can't crash
+        # the SDK-driven function-calling loop.
+        try:
+            result = run_memory_command(command, ctx)
+        except Exception as exc:
+            return f"Error: {exc}"
         calls["n"] += 1
-        return run_memory_command(command, ctx)
+        return result
 
     resp = client.models.generate_content(
         model=chosen_model,
@@ -526,7 +567,7 @@ def run_memory_command(command: str, ctx: TaskContext) -> str:
     if re.search(r"[|;&<>`$(){}]", command):
         return "Error: shell metacharacters are not allowed"
     try:
-        argv = shlex.split(command)
+        argv = shlex.split(command, posix=(os.name != "nt"))
     except ValueError as e:
         return f"Error: {e}"
     if not argv:
@@ -547,15 +588,17 @@ def run_memory_command(command: str, ctx: TaskContext) -> str:
     if executable in {"find", "grep"}:
         if executable == "find" and any(_is_destructive_find_primary(a) for a in argv[1:]):
             return "Error: destructive find primary not allowed"
-        checked = _validate_paths_in_args(argv[1:], allowed_roots, cwd=ctx.project_dir, allow_hash=False)
+        # Validate AND execute relative to the memory sandbox (input_dir), NOT project_dir:
+        # a bare filename or an omitted path operand then resolves inside the sandbox, so
+        # `grep PATTERN pyproject.toml` and `find -name '*.py'` cannot read or enumerate
+        # the project tree (project_dir is deliberately excluded from allowed_roots).
+        checked = _validate_paths_in_args(argv[1:], allowed_roots, cwd=ctx.input_dir, allow_hash=False)
         if checked:
             return checked
-        return _run_restricted(argv, ctx.project_dir)
-    if executable == "python3" and len(argv) >= 2 and Path(argv[1]).name == "parse-transcript.py":
-        checked = _validate_paths_in_args(argv[1:], allowed_roots, cwd=ctx.project_dir, allow_hash=False)
-        if checked:
-            return checked
-        return _run_restricted(argv, ctx.project_dir)
+        return _run_restricted(argv, ctx.input_dir)
+    # No python3 branch: the package ships no parse-transcript.py to pin to, and a
+    # basename-only check let any memory-root parse-transcript.py execute as trusted
+    # Python (data/code boundary collapse). Transcript drill-down is via `memsearch`.
     return f"Error: command {executable!r} is not allowed"
 
 
@@ -592,32 +635,58 @@ def _is_relative_to(path: Path, root: Path) -> bool:
     return False
 
 
+def _sandbox_env() -> dict[str, str]:
+    """Environment for restricted subprocesses: a controlled PATH limited to the dirs of
+    the trusted resolved binaries plus the running interpreter, so a poisoned or
+    `.`-containing inherited PATH cannot redirect any secondary lookup. The rest of the
+    environment is preserved (memsearch needs its Milvus/config vars to run expand)."""
+    import sys
+
+    env = {**os.environ, "MEMSEARCH_NO_WATCH": "1"}
+    trusted = {os.path.dirname(p) for p in _RESOLVED_BINARIES.values() if p}
+    trusted.add(os.path.dirname(sys.executable))
+    env["PATH"] = os.pathsep.join(sorted(d for d in trusted if d))
+    return env
+
+
 def _run_restricted(argv: list[str], cwd: Path) -> str:
+    # Run the resolved ABSOLUTE binary, never the bare name, so PATH cannot redirect it.
+    resolved = _RESOLVED_BINARIES.get(argv[0])
+    if resolved is None:
+        return f"Error: {argv[0]} is not available on this system"
     try:
         result = subprocess.run(
-            argv,
+            [resolved, *argv[1:]],
             capture_output=True,
             text=True,
             cwd=str(cwd),
-            env={**os.environ, "MEMSEARCH_NO_WATCH": "1"},
+            env=_sandbox_env(),
             timeout=15,
             check=False,
         )
     except Exception as e:
         return f"Error: {e}"
+    # Scrub THEN truncate (matching the journal path): truncating first could split a
+    # secret token across the cut and leak its tail. Tool output is fed back to the LLM.
     output = (result.stdout or result.stderr or "").strip()
-    return output[:MAX_COMMAND_OUTPUT]
+    return _scrub_secrets(output)[:MAX_COMMAND_OUTPUT]
 
 
 def _parse_task_response(raw: str) -> dict[str, str]:
     text = raw.strip()
-    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if match:
-        text = match.group(1)
+    # Try the whole text as JSON first; only fall back to fenced extraction if that fails.
+    # The fenced capture is greedy (`\{.*\}`) so braces inside string values (e.g.
+    # "a {b} c") are not truncated by a non-greedy match.
     try:
         data = json.loads(text)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"Maintenance LLM did not return valid JSON: {e}") from e
+    except json.JSONDecodeError:
+        match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
+        if match:
+            text = match.group(1)
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Maintenance LLM did not return valid JSON: {e}") from e
     action = data.get("action")
     if action not in {"none", "replace"}:
         raise RuntimeError("Maintenance LLM action must be 'none' or 'replace'")
@@ -645,7 +714,7 @@ def _atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
@@ -665,6 +734,25 @@ def _atomic_write_text(path: Path, text: str) -> None:
 
 def _save_state(path: Path, state: dict[str, Any]) -> None:
     _atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
+
+
+def _save_state_entry(path: Path, key: str, entry: dict[str, Any]) -> None:
+    """Persist one task's state entry by merging it into the on-disk state under a short
+    lock, so a concurrent process updating a DIFFERENT task does not lose this update.
+    The whole-file save would otherwise clobber sibling entries from a stale in-memory
+    copy (a lost-update race). Falls back to a best-effort merge if the lock is contended."""
+    lock_path = path.with_name(path.name + ".lock")
+    for _ in range(20):
+        with _file_lock(lock_path) as locked:
+            if locked:
+                disk = _load_state(path)
+                disk[key] = entry
+                _save_state(path, disk)
+                return
+        time.sleep(0.05)
+    disk = _load_state(path)
+    disk[key] = entry
+    _save_state(path, disk)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -715,12 +803,31 @@ def _file_lock(path: Path):
 
 
 def _reclaim_stale_lock(path: Path) -> bool:
-    """Remove the lock file if its owner PID is dead/unreadable. Returns True if reclaimed."""
+    """Remove the lock file ONLY if its owner PID is provably dead. Returns True if reclaimed.
+
+    An empty/unreadable lock is NOT treated as a dead owner: O_EXCL creates the file
+    before the PID is written, so a reader hitting that window must not misread the empty
+    file as a dead owner and delete a LIVE lock (admitting a second writer — the ABA
+    race). A fresh empty lock is assumed to belong to a live creator mid-write and is
+    reclaimed only after a grace period that dwarfs the create->write gap, so a genuine
+    crash still self-heals."""
     try:
-        owner_pid = int(path.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
+        content = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    if not content:
+        try:
+            if time.time() - path.stat().st_mtime < 10.0:
+                return False
+        except OSError:
+            return False
         owner_pid = -1
-    if _pid_alive(owner_pid):
+    else:
+        try:
+            owner_pid = int(content)
+        except ValueError:
+            owner_pid = -1
+    if owner_pid > 0 and _pid_alive(owner_pid):
         return False
     with contextlib.suppress(OSError):
         path.unlink()
