@@ -229,19 +229,39 @@ context=""
 
 if [ "$_has_artifact" = true ]; then
   # Option 1: inject the already-collapsed curated artifacts (higher signal-per-token
-  # than a raw daily-log tail), plus a short recent tail of today's file only.
-  # Byte caps (no token counter in bash): per-item caps clamp each item, TOTAL_MAX
-  # is the HARD ceiling. 2000*3 + 1500 = 7500 > 6000, so per-item caps alone are
-  # unenforceable — the running_total below enforces TOTAL_MAX in priority order.
-  ARTIFACT_MAX=2000
-  RECENT_TAIL_MAX=1500
-  TOTAL_MAX=6000
+  # than a raw daily-log tail), plus a recency-biased recent window with its OWN
+  # reserved budget so the artifacts can't starve it.
+  # Byte caps (no token counter in bash): per-item caps clamp each item;
+  # ARTIFACT_TOTAL_MAX is the HARD ceiling for the 3 curated artifacts ONLY (running_total
+  # below enforces it in priority order). The recent window is reserved on top.
+  # Grand total <= 5400 + (1600+800) = 7800 B.
+  ARTIFACT_MAX=2000            # per-artifact clamp (unchanged guard)
+  ARTIFACT_TOTAL_MAX=5400      # hard ceiling for the 3 curated artifacts ONLY (3x1800 post-A target)
+  RECENT_NEWEST_MAX=1600       # reserved, newest day (~today)
+  RECENT_PREV_MAX=800          # reserved, previous day  -> window = 2400, independent of artifacts
 
   context=$'# Recent Memory\n\n'
   running_total=0
 
+  # Back a byte-clamped body off to its last complete line so truncation lands on
+  # a bullet boundary (never a half-bullet; never a split multibyte char — '\n' is
+  # one byte). Falls back to the input unchanged for a single-line or would-be-empty result.
+  _trim_to_last_line() {
+    local s="$1" trimmed="${1%$'\n'*}"
+    if [ -n "$trimmed" ] && [ "$trimmed" != "$s" ]; then printf '%s' "$trimmed"; else printf '%s' "$s"; fi
+  }
+
+  # Keep the END of a chronological body (most-recent turns) within cap, starting at
+  # the first COMPLETE line — never a half-bullet, never a split multibyte char ('\n'
+  # is one byte). Inverse of _trim_to_last_line (which keeps the head for priority-first
+  # artifacts). Falls back to the input unchanged for single-line / would-be-empty.
+  _tail_to_first_line() {
+    local s="$1" trimmed="${1#*$'\n'}"
+    if [ -n "$trimmed" ] && [ "$trimmed" != "$s" ]; then printf '%s' "$trimmed"; else printf '%s' "$s"; fi
+  }
+
   # _append_item <heading> <body> <per_item_cap>
-  # Clamp body to its per-item cap; enforce TOTAL_MAX as the hard ceiling in
+  # Clamp body to its per-item cap; enforce ARTIFACT_TOTAL_MAX as the hard ceiling in
   # priority order. Returns 1 (stop) when the total budget is reached, else 0.
   _append_item() {
     local heading="$1" body="$2" cap="$3"
@@ -256,16 +276,18 @@ if [ "$_has_artifact" = true ]; then
     item=$(printf '%s' "$body" | head -c "$cap" || true)
     item_bytes=$(printf '%s' "$item" | wc -c || true)
     [ "$orig_bytes" -gt "$cap" ] && was_clamped=true
-    remaining=$((TOTAL_MAX - running_total))
+    remaining=$((ARTIFACT_TOTAL_MAX - running_total))
     if [ "$remaining" -le 0 ]; then
       return 1
     fi
     if [ "$item_bytes" -gt "$remaining" ]; then
       item=$(printf '%s' "$item" | head -c "$remaining" || true)
+      item=$(_trim_to_last_line "$item")
       context+="## $heading"$'\n'"$item"$'\n[truncated]\n\n'
       return 1
     fi
     if [ "$was_clamped" = true ]; then
+      item=$(_trim_to_last_line "$item")
       context+="## $heading"$'\n'"$item"$'\n[truncated]\n\n'
     else
       context+="## $heading"$'\n'"$item"$'\n\n'
@@ -274,9 +296,25 @@ if [ "$_has_artifact" = true ]; then
     return 0
   }
 
-  # Priority order: CORRECTIONS -> PROJECT -> USER -> recent-tail.
-  # Stop appending lower-priority items once the total budget is reached.
-  _done=false
+  # _append_recent <heading> <file> <cap> — inject the most-recent tail of a daily
+  # log's headings+bullets, capped on a line boundary. Independent of the artifact budget.
+  _append_recent() {
+    local heading="$1" file="$2" cap="$3" body item orig
+    [ -s "$file" ] || return 0
+    body=$(grep -E '^(#{2,4} |- )' "$file" 2>/dev/null || true)
+    [ -z "$body" ] && return 0
+    orig=$(printf '%s' "$body" | wc -c || true)
+    item=$(printf '%s' "$body" | tail -c "$cap" || true)
+    if [ "$orig" -gt "$cap" ]; then
+      item=$(_tail_to_first_line "$item")
+      context+="## $heading"$'\n[earlier turns omitted]\n'"$item"$'\n\n'
+    else
+      context+="## $heading"$'\n'"$item"$'\n\n'
+    fi
+  }
+
+  # Priority order for the curated artifacts: CORRECTIONS -> PROJECT -> USER.
+  # Stop appending lower-priority artifacts once ARTIFACT_TOTAL_MAX is reached.
   for _spec in "CORRECTIONS:$CORRECTIONS_FILE" "PROJECT:$PROJECT_FILE" "USER:$USER_FILE"; do
     _heading="${_spec%%:*}"
     _file="${_spec#*:}"
@@ -284,20 +322,19 @@ if [ "$_has_artifact" = true ]; then
     _body=$(cat "$_file" 2>/dev/null || true)
     [ -z "$_body" ] && continue
     if ! _append_item "$_heading" "$_body" "$ARTIFACT_MAX"; then
-      _done=true
       break
     fi
   done
 
-  # Recent tail: today's file only, so "what just happened" survives the
-  # 24h-gated curated cadence. Heading is the bare ISO date (## YYYY-MM-DD).
-  if [ "$_done" = false ]; then
-    _today="$MEMORY_BUCKET_DIR/$(date +%Y-%m-%d).md"
-    _tail=$(grep -E '^(#{2,4} |- )' "$_today" 2>/dev/null || true)
-    if [ -n "$_tail" ]; then
-      _append_item "$(date +%Y-%m-%d)" "$_tail" "$RECENT_TAIL_MAX" || true
-    fi
-  fi
+  # Recent raw window: previous day then newest day (newest nearest the live prompt),
+  # each with its OWN reserved budget so the curated artifacts above can't starve it.
+  # tail-truncated -> keeps the most-recent turns (older ones are the ones dropped).
+  _recent_files=$(find "$MEMORY_BUCKET_DIR" -maxdepth 1 -type f \
+    -name '2[0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].md' -print 2>/dev/null | sort -r | head -2 || true)
+  _newest=$(printf '%s\n' "$_recent_files" | sed -n '1p')
+  _prev=$(printf '%s\n' "$_recent_files" | sed -n '2p')
+  [ -n "$_prev" ]   && _append_recent "$(basename "${_prev%.md}")"   "$_prev"   "$RECENT_PREV_MAX"
+  [ -n "$_newest" ] && _append_recent "$(basename "${_newest%.md}")" "$_newest" "$RECENT_NEWEST_MAX"
 else
   # Fallback (maintenance off / zero-config).
   # Find the 2 most recent daily log files within the current repo bucket.

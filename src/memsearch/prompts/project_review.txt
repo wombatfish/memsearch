@@ -24,8 +24,11 @@ Rules:
 - Suggested sections are optional. Include only sections that are useful.
 - Keep the file concise and reviewable.
 - Prefer small targeted additions over broad rewrites when the existing output is already useful.
+- Cold-start injection budget (important): only the first ~1800 bytes of this file are injected into every session at startup; everything beyond that is not shown then and is reachable only via on-demand memory search. Write for that budget.
+- Order sections and entries by descending importance — most decision-relevant, currently-active items first — so that if the file is truncated, only the least important tail is lost.
+- Target <= ~1800 bytes (about 25-30 lines) for the whole file. Treat this as a hard cap, not a goal: this is a bounded, self-pruning file, not an append-only log. When adding an entry would exceed the budget, merge or drop the weakest or stalest existing entry to make room.
 
-Suggested Markdown shape:
+Suggested Markdown shape (order sections and the bullets within them most-important-first, so truncation drops only the least important tail):
 - # Project Memory
 - ## Current Direction
 - ## Active Threads

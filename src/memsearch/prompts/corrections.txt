@@ -41,6 +41,15 @@ Rules:
 - Keep the file concise and reviewable. Prefer small targeted additions over broad rewrites
   when the existing output is already useful.
 
+Cold-start injection budget (important):
+- Only the first ~1800 bytes of this file are injected into every session at startup; everything
+  beyond that is not shown then and is reachable only via on-demand memory search. Write for that budget.
+- Order sections and rules by descending importance — the single most useful, most repeat-preventing
+  rule first — so that if the file is truncated, only the least important tail is lost.
+- Target <= ~1800 bytes (about 25-30 lines) for the whole file. Treat this as a hard cap, not a goal:
+  this is a bounded, self-pruning file, not an append-only log. When adding a rule would exceed the
+  budget, merge or drop the weakest existing rule to make room.
+
 Pruning (keep the file from accumulating stale rules):
 - Re-evaluate each existing rule against the recent journals. Keep a rule while it is still
   observed or plausibly still applies ("still-observed / last-seen"); only remove a rule when
@@ -48,7 +57,7 @@ Pruning (keep the file from accumulating stale rules):
 - Do NOT remove a still-valid rule merely because it was not triggered recently. When unsure,
   keep it. Over-aggressive pruning is as harmful as no pruning.
 
-Suggested Markdown shape:
+Suggested Markdown shape (order sections and bullets most-important-first, per the budget above):
 - # Corrections
 - ## Do / Don't
 - ## Gotchas (library / tool / platform)

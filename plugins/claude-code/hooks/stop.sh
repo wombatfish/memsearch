@@ -234,8 +234,15 @@ trap - EXIT
 kill_orphaned_milvus_lite
 
 # Index immediately — don't rely on watch (which may be killed by SessionEnd before
-# debounce fires). --replace takes over a hung prior indexer so per-turn capture
-# can't be blocked indefinitely (server mode has no SessionStart re-index to recover it).
-run_memsearch index "$MEMORY_DIR" --replace
+# debounce fires). Scope to the single daily file we just wrote, NOT the whole
+# MEMORY_DIR: a scoped index is scope-safe (its deleted-file GC only prunes within
+# the scanned path — core.py) and one-file cheap, so N parallel Stop hooks don't each
+# re-scan the whole tree and thrash one another via --replace. Guard on the append
+# having landed (acquired) and the file existing; a skipped turn lives in the
+# .pending sidecar and is recovered + indexed at the next SessionStart. --replace
+# still takes over a hung prior indexer so per-turn capture can't be blocked.
+if [ "$acquired" = 1 ] && [ -f "$MEMORY_FILE" ]; then
+  run_memsearch index "$MEMORY_FILE" --replace
+fi
 
 echo '{}'

@@ -743,6 +743,45 @@ def _extract_section(
     return content, section_start + 1, section_end
 
 
+def _spawn_detached_watch() -> None:
+    """Re-launch the current ``watch`` invocation as a windowless background
+    process (Windows only).
+
+    The Claude Code hook starts ``memsearch.exe watch`` through MSYS bash, which
+    cannot pass Windows process-creation flags, so the native console exe pops up
+    a terminal window. Here the bootstrap re-launches itself with
+    ``CREATE_NO_WINDOW`` and exits; ``MEMSEARCH_WATCH_DETACHED`` stops the child
+    from re-launching a second time.
+
+    Flag choice matters. ``memsearch.exe`` (a uv-tool console script) is a
+    launcher → venv-python *trampoline* → base interpreter, so the long-lived
+    watcher is a *grandchild* of the process we spawn here. ``CREATE_NO_WINDOW``
+    gives our immediate child a HIDDEN console that the grandchild **inherits**,
+    so it too stays hidden. ``DETACHED_PROCESS`` would instead give the child NO
+    console — forcing the grandchild to allocate a fresh *visible* one (verified:
+    the watcher window reappeared). The hidden console plus a new process group
+    keeps the watcher independent of the launching shell.
+    """
+    import subprocess
+
+    CREATE_NO_WINDOW = 0x08000000
+    CREATE_NEW_PROCESS_GROUP = 0x00000200
+
+    env = dict(os.environ)
+    env["MEMSEARCH_WATCH_DETACHED"] = "1"
+    # Pass a real argv list (no shell): paths/description with spaces survive
+    # without quoting. `-m memsearch` re-enters this same CLI in the uv-tool venv.
+    subprocess.Popen(
+        [sys.executable, "-m", "memsearch", *sys.argv[1:]],
+        creationflags=CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        env=env,
+    )
+
+
 @cli.command()
 @click.argument("paths", nargs=-1, required=False, type=click.Path(exists=True))
 @_common_options
@@ -764,6 +803,14 @@ def _extract_section(
     help="Stop any running watcher for the resolved collection and exit without starting "
     "a new one (cross-platform replacement for pgrep/kill). Exits 0 if none was running.",
 )
+@click.option(
+    "--detach",
+    is_flag=True,
+    default=False,
+    help="Windows only: re-launch as a detached, windowless background process so no "
+    "console window pops up (used by session hooks). No effect on POSIX, and ignored when "
+    "run interactively without the flag.",
+)
 def watch(
     paths: tuple[str, ...],
     provider: str | None,
@@ -779,8 +826,23 @@ def watch(
     description: str | None,
     replace: bool,
     stop: bool,
+    detach: bool,
 ) -> None:
     """Watch PATHS for markdown changes and auto-index."""
+    # Windows: re-launch windowless before any heavy work, so the bootstrap that
+    # the MSYS hook spawns does the minimum and exits fast (see
+    # _spawn_detached_watch). Guard: only for a real `watch` (paths, not --stop)
+    # and only once (the child carries MEMSEARCH_WATCH_DETACHED=1).
+    if (
+        detach
+        and not stop
+        and paths
+        and sys.platform == "win32"
+        and os.environ.get("MEMSEARCH_WATCH_DETACHED") != "1"
+    ):
+        _spawn_detached_watch()
+        return
+
     from .core import MemSearch
 
     cfg = _safe_resolve_config(

@@ -93,7 +93,7 @@ The SessionStart hook runs once when Claude Code opens a new session. It perform
 1. **Config validation** -- reads the memsearch config and validates the API key for the configured embedding provider (ONNX needs no key)
 2. **Start watcher** -- launches `memsearch watch .memsearch/memory/` as a singleton background process (PID file at `.memsearch/.watch.pid` prevents duplicates)
 3. **Session heading** -- writes `## Session HH:MM` to today's memory file (`YYYY-MM-DD.md`), marking the start of a new session
-4. **Cold-start injection** -- reads the last 30 lines from the 2 most recent daily logs and returns them as `additionalContext` so Claude has immediate awareness of recent work
+4. **Cold-start injection** -- returns recent memory as `additionalContext` so Claude has immediate awareness of recent work. With curated memory files present (`CORRECTIONS.md`/`PROJECT.md`/`USER.md`), it injects those plus a reserved, recency-biased window of the 2 most recent daily logs (newest nearest the prompt); otherwise it falls back to those 2 daily logs alone
 5. **Update check** -- queries PyPI (2s timeout) and shows an update banner if a newer version exists
 
 The cold-start injection is critical for early-session context. Without it, Claude would have no idea what happened yesterday until the memory-recall skill triggers -- but the skill only triggers when Claude judges it would help, which requires knowing that relevant history exists.

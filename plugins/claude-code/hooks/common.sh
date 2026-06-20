@@ -282,18 +282,26 @@ start_watch() {
     return 0
   fi
 
-  # Server (http/tcp): setsid — watch runs persistently for real-time indexing.
-  local launch_prefix="nohup"
-  command -v setsid &>/dev/null && launch_prefix="setsid"
+  # Server (http/tcp): watch runs persistently for real-time indexing.
+  # Windows (MSYS/Cygwin): setsid allocates a NEW console for the native
+  # memsearch.exe, popping up a terminal window over other apps. Use nohup
+  # (keeps the hidden bash console, no new window) and pass --detach so the CLI
+  # re-launches itself fully windowless (CREATE_NO_WINDOW). On POSIX, prefer
+  # setsid for proper daemonization; --detach is unused there.
+  local launch_prefix="nohup" detach_flag=""
+  case "${OS:-}|${OSTYPE:-}" in
+    *Windows_NT*|*msys*|*cygwin*) detach_flag="--detach" ;;
+    *) command -v setsid &>/dev/null && launch_prefix="setsid" ;;
+  esac
 
   # --replace: the new watcher terminates any live incumbent on the same
   # collection and takes over (cross-platform reap, in Python). The bash
   # stop_watch sweep above is POSIX-only and a silent no-op on Windows, where
   # pgrep is absent and the $! pidfile holds an MSYS PID, not memsearch.exe's.
   if [ -n "$COLLECTION_NAME" ]; then
-    $launch_prefix $MEMSEARCH_CMD watch "$MEMORY_DIR" --collection "$COLLECTION_NAME" --replace ${COLLECTION_DESC:+--description "$COLLECTION_DESC"} </dev/null &>/dev/null &
+    $launch_prefix $MEMSEARCH_CMD watch "$MEMORY_DIR" --collection "$COLLECTION_NAME" --replace $detach_flag ${COLLECTION_DESC:+--description "$COLLECTION_DESC"} </dev/null &>/dev/null &
   else
-    $launch_prefix $MEMSEARCH_CMD watch "$MEMORY_DIR" --replace ${COLLECTION_DESC:+--description "$COLLECTION_DESC"} </dev/null &>/dev/null &
+    $launch_prefix $MEMSEARCH_CMD watch "$MEMORY_DIR" --replace $detach_flag ${COLLECTION_DESC:+--description "$COLLECTION_DESC"} </dev/null &>/dev/null &
   fi
   echo $! > "$WATCH_PIDFILE"
 }
