@@ -56,6 +56,10 @@ class MistralEmbedding:
             self._dimension = _detect_dimension(self._client, self._model)
         return self._dimension
 
+    @property
+    def batch_size(self) -> int:
+        return self._batch_size
+
     async def embed(self, texts: list[str]) -> list[list[float]]:
         from .utils import batched_embed
 

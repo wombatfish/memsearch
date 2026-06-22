@@ -8,7 +8,7 @@ import math
 import os
 import re
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import date
 from itertools import pairwise
 from pathlib import Path
@@ -468,53 +468,40 @@ class MemSearch:
             return 0
 
         model = self._embedder.model_name
-        # Clean content for embedding: strip HTML comments and metadata noise
-        # so the embedding vector captures semantics, not UUIDs/paths.
-        # The original content is preserved in the Milvus record below.
-        contents = [clean_content_for_embedding(c.content) for c in chunks]
-        embeddings = await self._embedder.embed(contents)
+        total = 0
+        all_ids: list[str] = []
+        all_embeddings: list[list[float]] = []
+        for batch in _chunk_batches(chunks, self._embedder.batch_size):
+            # Clean content for embedding: strip HTML comments and metadata noise
+            # so the embedding vector captures semantics, not UUIDs/paths.
+            # The original content is preserved in the Milvus record below.
+            contents = [clean_content_for_embedding(c.content) for c in batch]
+            embeddings = await self._embedder.embed(contents)
+            records = _records_for_chunks(batch, embeddings, model)
+            total += self._store.upsert(records)
+            all_ids.extend(r["chunk_hash"] for r in records)
+            all_embeddings.extend(embeddings)
 
-        records: list[dict[str, Any]] = []
-        for i, chunk in enumerate(chunks):
-            chunk_id = compute_chunk_id(
-                chunk.source,
-                chunk.start_line,
-                chunk.end_line,
-                chunk.content_hash,
-                model,
-            )
-            records.append(
-                {
-                    "chunk_hash": chunk_id,
-                    "embedding": embeddings[i],
-                    "content": chunk.content,
-                    "source": chunk.source,
-                    # Truncate to fit the heading VARCHAR (max_length=1024) —
-                    # an oversize heading would fail the entire batch upsert.
-                    "heading": chunk.heading[:1000],
-                    "heading_level": chunk.heading_level,
-                    "start_line": chunk.start_line,
-                    "end_line": chunk.end_line,
-                }
-            )
-
-        n = self._store.upsert(records)
         # Note: under Bounded consistency a remote Milvus may not yet see the
         # chunks just upserted above, so intra-batch similar edges can be
         # missed here. Acceptable: `memsearch graph rebuild` recovers them.
         if self._edges is not None and self._graph_similar_top_n > 0:
-            ids = [r["chunk_hash"] for r in records]
             sim_edges: list[tuple[str, str, str, float, str]] = []
             hits: list[list[dict[str, Any]]] = []
-            for i in range(0, len(embeddings), 1024):
-                hits.extend(self._store.dense_search(embeddings[i : i + 1024], top_k=self._graph_similar_top_n + 1))
-            for own_id, hit_list in zip(ids, hits, strict=True):
+            for i in range(0, len(all_embeddings), 1024):
+                hits.extend(
+                    self._store.dense_search(
+                        all_embeddings[i : i + 1024],
+                        top_k=self._graph_similar_top_n + 1,
+                    )
+                )
+            for own_id, hit_list in zip(all_ids, hits, strict=True):
                 for h in hit_list:
                     nbr, sim = h["chunk_hash"], max(0.0, h["score"])
                     if nbr != own_id and sim >= self._graph_similar_threshold:
                         sim_edges.append((own_id, nbr, "similar", sim, model))
             self._edges.add_edges(sim_edges)
-        return n
+        return total
 
     async def rebuild_edges(self) -> int:
         """Rebuild chunk_edges from stored chunks/embeddings. No embedding API calls."""
@@ -997,3 +984,37 @@ class MemSearch:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+
+def _chunk_batches(chunks: list[Chunk], batch_size: int) -> Iterator[list[Chunk]]:
+    if batch_size <= 0:
+        raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+    for i in range(0, len(chunks), batch_size):
+        yield chunks[i : i + batch_size]
+
+
+def _records_for_chunks(chunks: list[Chunk], embeddings: list[list[float]], model: str) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for chunk, embedding in zip(chunks, embeddings, strict=True):
+        chunk_id = compute_chunk_id(
+            chunk.source,
+            chunk.start_line,
+            chunk.end_line,
+            chunk.content_hash,
+            model,
+        )
+        records.append(
+            {
+                "chunk_hash": chunk_id,
+                "embedding": embedding,
+                "content": chunk.content,
+                "source": chunk.source,
+                # Truncate to fit the heading VARCHAR (max_length=1024);
+                # an oversize heading would fail the entire batch upsert.
+                "heading": chunk.heading[:1000],
+                "heading_level": chunk.heading_level,
+                "start_line": chunk.start_line,
+                "end_line": chunk.end_line,
+            }
+        )
+    return records

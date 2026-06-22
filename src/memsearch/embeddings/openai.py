@@ -56,6 +56,10 @@ class OpenAIEmbedding:
             self._dimension = _detect_dimension(self._model, self._client_kwargs)
         return self._dimension
 
+    @property
+    def batch_size(self) -> int:
+        return self._batch_size
+
     async def embed(self, texts: list[str]) -> list[list[float]]:
         from .utils import batched_embed
 

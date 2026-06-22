@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -87,6 +88,7 @@ class FakeEmbedder:
         self._batch_size = batch_size
         self._dim = dim
         self.call_sizes: list[int] = []
+        self._next_embedding_index = 0
 
     @property
     def model_name(self) -> str:
@@ -96,6 +98,10 @@ class FakeEmbedder:
     def dimension(self) -> int:
         return self._dim
 
+    @property
+    def batch_size(self) -> int:
+        return self._batch_size
+
     async def embed(self, texts: list[str]) -> list[list[float]]:
         from memsearch.embeddings.utils import batched_embed
 
@@ -103,7 +109,9 @@ class FakeEmbedder:
 
     async def _embed_batch(self, texts: list[str]) -> list[list[float]]:
         self.call_sizes.append(len(texts))
-        return [[0.0] * self._dim for _ in texts]
+        start = self._next_embedding_index
+        self._next_embedding_index += len(texts)
+        return [[float(i)] + [0.0] * (self._dim - 1) for i in range(start, start + len(texts))]
 
 
 @pytest.fixture
@@ -116,8 +124,63 @@ def mem_with_fake(tmp_path: Path):
     ms._overlap_lines = 2
     ms._embedder = fake
     ms._store = MilvusStore(uri=str(tmp_path / "test.db"), dimension=fake.dimension)
+    ms._edges = None
+    ms._graph_similar_top_n = 0
+    ms._graph_similar_threshold = 0.0
     yield ms, fake
     ms.close()
+
+
+class RecordingStore:
+    """Records upsert batch sizes without opening a real Milvus connection."""
+
+    def __init__(self) -> None:
+        self.call_sizes: list[int] = []
+        self.records: list[dict[str, Any]] = []
+
+    def upsert(self, records: list[dict[str, Any]]) -> int:
+        self.call_sizes.append(len(records))
+        self.records.extend(records)
+        return len(records)
+
+    def dense_search(self, vectors: list[list[float]], top_k: int = 10) -> list[list[dict[str, Any]]]:
+        hits: list[list[dict[str, Any]]] = []
+        for vector in vectors:
+            own_index = int(vector[0])
+            hit_list = [{"chunk_hash": self.records[own_index]["chunk_hash"], "score": 1.0}]
+            if own_index == 2 and len(self.records) > 3:
+                hit_list.append({"chunk_hash": self.records[3]["chunk_hash"], "score": 0.9})
+            elif own_index == 3 and len(self.records) > 2:
+                hit_list.append({"chunk_hash": self.records[2]["chunk_hash"], "score": 0.9})
+            hits.append(hit_list[:top_k])
+        return hits
+
+
+class RecordingEdgeStore:
+    """Records similarity edges without opening a real edge database."""
+
+    def __init__(self) -> None:
+        self.edges: list[tuple[str, str, str, float, str]] = []
+
+    def add_edges(self, edges: list[tuple[str, str, str, float, str]]) -> None:
+        self.edges.extend(edges)
+
+
+@pytest.fixture
+def mem_with_recording_store():
+    """MemSearch instance wired to fake embedding and fake storage."""
+    fake = FakeEmbedder(batch_size=4, dim=4)
+    store = RecordingStore()
+    ms = MemSearch.__new__(MemSearch)
+    ms._paths = []
+    ms._max_chunk_size = 1500
+    ms._overlap_lines = 2
+    ms._embedder = fake
+    ms._store = store
+    ms._edges = None
+    ms._graph_similar_top_n = 0
+    ms._graph_similar_threshold = 0.0
+    return ms, fake, store
 
 
 def _make_chunks(n: int) -> list[Chunk]:
@@ -143,6 +206,37 @@ async def test_embed_and_store_batching(mem_with_fake):
     assert n == 10
     # Should have been split into 3 batches: 4 + 4 + 2
     assert fake.call_sizes == [4, 4, 2]
+
+
+@pytest.mark.asyncio
+async def test_embed_and_store_upserts_by_embedding_batch(mem_with_recording_store):
+    ms, fake, store = mem_with_recording_store
+    chunks = _make_chunks(10)  # 10 chunks, batch size 4
+    n = await ms._embed_and_store(chunks)
+    assert n == 10
+    assert fake.call_sizes == [4, 4, 2]
+    assert store.call_sizes == [4, 4, 2]
+    assert len(store.records) == 10
+
+
+@pytest.mark.asyncio
+async def test_embed_and_store_preserves_cross_batch_edges(mem_with_recording_store):
+    ms, fake, store = mem_with_recording_store
+    fake._batch_size = 3
+    edge_store = RecordingEdgeStore()
+    ms._edges = edge_store
+    ms._graph_similar_top_n = 1
+    ms._graph_similar_threshold = 0.5
+
+    chunks = _make_chunks(6)
+    n = await ms._embed_and_store(chunks)
+
+    assert n == 6
+    assert store.call_sizes == [3, 3]
+    assert {edge[:3] for edge in edge_store.edges} == {
+        (store.records[2]["chunk_hash"], store.records[3]["chunk_hash"], "similar"),
+        (store.records[3]["chunk_hash"], store.records[2]["chunk_hash"], "similar"),
+    }
 
 
 @_requires_milvus_lite
