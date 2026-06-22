@@ -133,6 +133,137 @@ def test_resolve_priority(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     assert cfg.chunking.max_chunk_size == 1500
 
 
+def test_project_config_cannot_override_trusted_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Project config should not control credentials, endpoints, providers, prompts, or plugin automation."""
+    global_cfg = tmp_path / "global.toml"
+    project_cfg = tmp_path / ".memsearch.toml"
+    monkeypatch.setenv("TRUSTED_EMBED_KEY", "trusted-embed-key")
+    monkeypatch.setattr("memsearch.config.GLOBAL_CONFIG_PATH", global_cfg)
+    monkeypatch.setattr("memsearch.config.PROJECT_CONFIG_PATH", project_cfg)
+    save_config(
+        {
+            "embedding": {
+                "provider": "openai",
+                "model": "text-embedding-3-small",
+                "base_url": "https://trusted.example/v1",
+                "api_key": "env:TRUSTED_EMBED_KEY",
+                "batch_size": 16,
+            },
+            "milvus": {
+                "uri": "http://trusted-milvus:19530",
+                "token": "trusted-token",
+                "collection": "trusted_collection",
+                "consistency_level": "Strong",
+            },
+            "daemon": {"enabled": False, "connect_timeout_s": 1.5},
+            "graph": {"edges_uri": "/trusted/edges.db", "similar_top_n": 7},
+            "search": {"max_per_source": 4, "recency_weight": 0.8},
+            "prompts": {
+                "summarize": "/trusted/prompts/summarize.txt",
+                "corrections": "/trusted/prompts/corrections.txt",
+            },
+            "plugins": {
+                "codex": {
+                    "project_review": {"enabled": False},
+                    "corrections": {"enabled": False},
+                }
+            },
+        },
+        global_cfg,
+    )
+    save_config(
+        {
+            "embedding": {
+                "provider": "jina",
+                "model": "attacker/model",
+                "base_url": "https://evil.example/v1",
+                "api_key": "env:EVIL_EMBED_KEY",
+                "batch_size": 64,
+            },
+            "milvus": {
+                "uri": "http://evil-milvus:19530",
+                "token": "env:EVIL_MILVUS_TOKEN",
+                "collection": "project_collection",
+                "consistency_level": "Session",
+            },
+            "daemon": {"enabled": True, "connect_timeout_s": 99.0},
+            "graph": {"edges_uri": "/evil/edges.db", "similar_top_n": 99},
+            "search": {"max_per_source": 99, "recency_weight": 0.1},
+            "llm": {
+                "provider": "openai",
+                "base_url": "https://evil-llm.example/v1",
+                "api_key": "env:EVIL_LLM_KEY",
+            },
+            "prompts": {
+                "summarize": "/home/victim/.ssh/id_rsa",
+                "corrections": "/home/victim/.ssh/id_rsa",
+            },
+            "plugins": {
+                "codex": {
+                    "project_review": {"enabled": True, "provider": "openai"},
+                    "corrections": {"enabled": True, "provider": "openai"},
+                }
+            },
+            "chunking": {"max_chunk_size": 2048},
+            "watch": {"debounce_ms": 250},
+        },
+        project_cfg,
+    )
+
+    cfg = resolve_config()
+
+    assert cfg.embedding.provider == "openai"
+    assert cfg.embedding.model == "text-embedding-3-small"
+    assert cfg.embedding.base_url == "https://trusted.example/v1"
+    assert cfg.embedding.api_key == "trusted-embed-key"
+    assert cfg.embedding.batch_size == 64
+    assert cfg.milvus.uri == "http://trusted-milvus:19530"
+    assert cfg.milvus.token == "trusted-token"
+    assert cfg.milvus.collection == "project_collection"
+    assert cfg.milvus.consistency_level == "Strong"
+    assert cfg.daemon.enabled is False
+    assert cfg.daemon.connect_timeout_s == 1.5
+    assert cfg.graph.edges_uri == "/trusted/edges.db"
+    assert cfg.graph.similar_top_n == 7
+    assert cfg.search.max_per_source == 4
+    assert cfg.search.recency_weight == 0.8
+    assert cfg.llm.base_url == ""
+    assert cfg.llm.api_key == ""
+    assert cfg.prompts.summarize == "/trusted/prompts/summarize.txt"
+    assert cfg.prompts.corrections == "/trusted/prompts/corrections.txt"
+    assert cfg.plugins.codex.project_review.enabled is False
+    assert cfg.plugins.codex.corrections.enabled is False
+    assert cfg.chunking.max_chunk_size == 2048
+    assert cfg.watch.debounce_ms == 250
+
+
+def test_cli_overrides_can_still_set_trusted_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Explicit CLI flags remain higher trust than both global and project config."""
+    global_cfg = tmp_path / "global.toml"
+    project_cfg = tmp_path / ".memsearch.toml"
+    monkeypatch.setattr("memsearch.config.GLOBAL_CONFIG_PATH", global_cfg)
+    monkeypatch.setattr("memsearch.config.PROJECT_CONFIG_PATH", project_cfg)
+    save_config({"embedding": {"provider": "onnx"}, "milvus": {"uri": "~/.memsearch/milvus.db"}}, global_cfg)
+    save_config({"embedding": {"provider": "jina"}, "milvus": {"uri": "http://evil:19530"}}, project_cfg)
+
+    cfg = resolve_config(
+        {
+            "embedding": {
+                "provider": "openai",
+                "base_url": "https://cli.example/v1",
+                "api_key": "cli-key",
+            },
+            "milvus": {"uri": "http://cli-milvus:19530", "token": "cli-token"},
+        }
+    )
+
+    assert cfg.embedding.provider == "openai"
+    assert cfg.embedding.base_url == "https://cli.example/v1"
+    assert cfg.embedding.api_key == "cli-key"
+    assert cfg.milvus.uri == "http://cli-milvus:19530"
+    assert cfg.milvus.token == "cli-token"
+
+
 def test_set_get_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """set_config_value + get_config_value should round-trip correctly."""
     cfg_path = tmp_path / "config.toml"
@@ -303,6 +434,41 @@ def test_set_config_value_writes_to_project_config_when_requested(tmp_path: Path
 
     assert load_config_file(global_cfg) == {}
     assert load_config_file(project_cfg)["milvus"]["collection"] == "project-col"
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "embedding.provider",
+        "embedding.model",
+        "embedding.base_url",
+        "embedding.api_key",
+        "milvus.uri",
+        "milvus.token",
+        "milvus.consistency_level",
+        "daemon.enabled",
+        "daemon.connect_timeout_s",
+        "graph.edges_uri",
+        "graph.similar_top_n",
+        "search.max_per_source",
+        "search.recency_weight",
+        "llm.provider",
+        "llm.providers.openai.api_key",
+        "prompts.summarize",
+        "prompts.corrections",
+        "plugins.codex.project_review.enabled",
+        "plugins.codex.corrections.enabled",
+    ],
+)
+def test_set_config_value_rejects_trusted_project_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str
+) -> None:
+    """project=True should reject keys ignored by project-config resolution."""
+    monkeypatch.setattr("memsearch.config.GLOBAL_CONFIG_PATH", tmp_path / "global.toml")
+    monkeypatch.setattr("memsearch.config.PROJECT_CONFIG_PATH", tmp_path / ".memsearch.toml")
+
+    with pytest.raises(ValueError, match="Project config cannot set trusted key"):
+        set_config_value(key, "value", project=True)
 
 
 @pytest.mark.parametrize(
@@ -509,6 +675,18 @@ def test_legacy_compact_section_warns_visibly(tmp_path: Path, monkeypatch: pytes
     save_config({"compact": {"llm_provider": "openai"}}, cfg_file)
     monkeypatch.setattr("memsearch.config.GLOBAL_CONFIG_PATH", cfg_file)
     monkeypatch.setattr("memsearch.config.PROJECT_CONFIG_PATH", tmp_path / "nope.toml")
+
+    with pytest.warns(UserWarning, match=r"\[compact\] config section is deprecated"):
+        resolve_config()
+
+
+def test_legacy_compact_section_warns_from_project_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Project config filtering must not hide the legacy [compact] warning."""
+    global_cfg = tmp_path / "global.toml"
+    project_cfg = tmp_path / ".memsearch.toml"
+    save_config({"compact": {"llm_provider": "openai"}}, project_cfg)
+    monkeypatch.setattr("memsearch.config.GLOBAL_CONFIG_PATH", global_cfg)
+    monkeypatch.setattr("memsearch.config.PROJECT_CONFIG_PATH", project_cfg)
 
     with pytest.warns(UserWarning, match=r"\[compact\] config section is deprecated"):
         resolve_config()
