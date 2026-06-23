@@ -160,6 +160,106 @@ def _structural_edges(
     return edges
 
 
+def _extract_section(
+    all_lines: list[str],
+    start_line: int,
+    heading_level: int,
+) -> tuple[str, int, int]:
+    """Extract the full markdown section containing a chunk."""
+    section_start = start_line - 1
+    if heading_level > 0:
+        for i in range(start_line - 2, -1, -1):
+            m = _HEADING_RE.match(all_lines[i])
+            if m and len(m.group(1)) <= heading_level:
+                section_start = i
+                break
+
+    section_end = len(all_lines)
+    if heading_level > 0:
+        for i in range(start_line, len(all_lines)):
+            m = _HEADING_RE.match(all_lines[i])
+            if m and len(m.group(1)) <= heading_level:
+                section_end = i
+                break
+
+    return "\n".join(all_lines[section_start:section_end]), section_start + 1, section_end
+
+
+def _build_expand_result(
+    store: MilvusStore,
+    chunk_hash: str,
+    *,
+    section: bool,
+    lines: int | None,
+    cfg: Any | None = None,
+) -> dict[str, Any]:
+    """Build the exact JSON object emitted by ``memsearch expand --json-output``.
+
+    ``cfg`` is accepted for the daemon/CLI shared call shape and future expansion;
+    the current expansion only needs a store handle and source file contents.
+    """
+    del cfg
+    if not re.fullmatch(r"[0-9a-fA-F]{1,64}", chunk_hash):
+        raise ValueError(f"Invalid chunk hash: {chunk_hash!r}")
+    if lines is not None and lines < 0:
+        raise ValueError("lines must be >= 0")
+
+    from .store import _escape_filter_value
+
+    chunks = store.query(filter_expr=f'chunk_hash == "{_escape_filter_value(chunk_hash)}"')
+    if not chunks:
+        raise FileNotFoundError(f"Chunk not found: {chunk_hash}")
+
+    chunk = chunks[0]
+    try:
+        source = chunk["source"]
+        start_line = int(chunk["start_line"])
+        end_line = int(chunk["end_line"])
+    except KeyError as e:
+        raise ValueError(f"Malformed chunk in database: missing field {e}") from e
+    heading = chunk.get("heading", "")
+    heading_level = int(chunk.get("heading_level", 0) or 0)
+
+    source_path = Path(source)
+    if not source_path.exists():
+        raise FileNotFoundError(f"Source file not found: {source}")
+
+    all_lines = source_path.read_text(encoding="utf-8", errors="replace").splitlines()
+
+    if lines is not None:
+        ctx_start = max(0, start_line - 1 - lines)
+        ctx_end = min(len(all_lines), end_line + lines)
+        expanded = "\n".join(all_lines[ctx_start:ctx_end])
+        expanded_start = ctx_start + 1
+        expanded_end = ctx_end
+    elif section:
+        expanded, expanded_start, expanded_end = _extract_section(all_lines, start_line, heading_level)
+    else:
+        expanded = "\n".join(all_lines[start_line - 1 : end_line])
+        expanded_start = start_line
+        expanded_end = end_line
+
+    anchor_match = re.search(
+        r"<!--\s*session:(\S+)\s+turn:(\S+)\s+transcript:(\S+)\s*-->",
+        expanded,
+    )
+    result: dict[str, Any] = {
+        "chunk_hash": chunk_hash,
+        "source": source,
+        "heading": heading,
+        "start_line": expanded_start,
+        "end_line": expanded_end,
+        "content": expanded,
+    }
+    if anchor_match:
+        result["anchor"] = {
+            "session": anchor_match.group(1),
+            "turn": anchor_match.group(2),
+            "transcript": anchor_match.group(3),
+        }
+    return result
+
+
 class MemSearch:
     """High-level API for semantic memory search.
 
@@ -245,6 +345,10 @@ class MemSearch:
         self._fetch_multiplier = fetch_multiplier
         self._edges = EdgeStore(graph_edges_uri) if graph_enabled else None
         self._edges_checked = False
+        self._watch_lock = threading.Lock()
+        # _watch_loop is initialised lazily in watch(); do not access outside the watch main thread.
+        self._watch_loop: asyncio.AbstractEventLoop | None = None
+        self._watch_on_event: Callable[[str, str, Path], None] | None = None
 
     # ------------------------------------------------------------------
     # Indexing
@@ -490,22 +594,7 @@ class MemSearch:
             Each dict contains ``content``, ``source``, ``heading``,
             ``score``, and other metadata.
         """
-        filter_expr = ""
-        if source_prefix is not None:
-            from .store import _escape_filter_value
-
-            prefix = str(Path(source_prefix).expanduser().resolve())
-
-            def _esc_like(v: str) -> str:
-                # Pattern-level escaping FIRST (a literal backslash must become
-                # \\ before % and _ are escaped, or a trailing Windows path
-                # separator swallows the appended % wildcard), THEN escape the
-                # finished pattern as a Milvus string literal.
-                pattern = v.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-                return _escape_filter_value(pattern)
-
-            prefix_with_sep = prefix if prefix.endswith(os.sep) else prefix + os.sep
-            filter_expr = f'source == "{_escape_filter_value(prefix)}" or source like "{_esc_like(prefix_with_sep)}%"'
+        filter_expr = self._source_prefix_filter(source_prefix)
 
         embeddings = await self._embedder.embed([query])
         # Over-fetch when any post-search stage (rerank / recency / per-source cap)
@@ -516,19 +605,7 @@ class MemSearch:
         post_stages = bool(self._reranker_model) or self._recency_weight > 0 or self._max_per_source > 0
         fetch_k = top_k * self._fetch_multiplier if post_stages else top_k
         results = self._store.search(embeddings[0], query_text=query, top_k=fetch_k, filter_expr=filter_expr)
-        if self._graph_enabled and self._edges is not None and results:
-            # Latch after the FIRST check regardless of outcome: in the healthy
-            # (edges present) case the warning never fires, so a non-latched gate
-            # would re-run the check on every search. Scope the emptiness probe to
-            # this query's own result hashes — edges.db is shared across
-            # collections, so a global is_empty() would suppress the hint for a
-            # fresh collection co-mingled with a populated one.
-            if not self._edges_checked:
-                self._edges_checked = True
-                result_hashes = [r["chunk_hash"] for r in results]
-                if self._edges.is_empty_for(result_hashes) and self._store.count() > 0:
-                    logger.warning("graph mode on but no edges — run `memsearch graph rebuild`")
-            results = self._graph_expand(results, top_k=fetch_k, filter_expr=filter_expr)
+        results = self._expand_with_edges(results, fetch_k=fetch_k, filter_expr=filter_expr)
         if self._reranker_model and results:
             from .reranker import rerank
 
@@ -545,6 +622,128 @@ class MemSearch:
         if self._max_per_source > 0 and results:
             results = _cap_per_source(results, self._max_per_source)
         return results[:top_k]
+
+    def _source_prefix_filter(self, source_prefix: str | Path | None) -> str:
+        """Build the Milvus filter expression scoping results to a source prefix.
+
+        Shared by ``search`` and ``search_many`` — the escaping is subtle and must
+        not drift between the two call sites.
+        """
+        if source_prefix is None:
+            return ""
+        from .store import _escape_filter_value
+
+        prefix = str(Path(source_prefix).expanduser().resolve())
+
+        def _esc_like(v: str) -> str:
+            # Pattern-level escaping FIRST (a literal backslash must become \\
+            # before % and _ are escaped, or a trailing Windows path separator
+            # swallows the appended % wildcard), THEN escape the finished pattern
+            # as a Milvus string literal.
+            pattern = v.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            return _escape_filter_value(pattern)
+
+        prefix_with_sep = prefix if prefix.endswith(os.sep) else prefix + os.sep
+        return f'source == "{_escape_filter_value(prefix)}" or source like "{_esc_like(prefix_with_sep)}%"'
+
+    def _expand_with_edges(
+        self, results: list[dict[str, Any]], *, fetch_k: int, filter_expr: str
+    ) -> list[dict[str, Any]]:
+        """Graph-expand results when graph mode is on, warning once if edges are empty."""
+        if not (self._graph_enabled and self._edges is not None and results):
+            return results
+        # Latch after the FIRST non-empty check regardless of outcome: in the
+        # healthy (edges present) case the warning never fires, so a non-latched
+        # gate would re-run the check on every search. Scope the emptiness probe
+        # to this result set's hashes — edges.db is shared across collections, so
+        # a global is_empty() would suppress the hint for a fresh collection
+        # co-mingled with a populated one.
+        if not self._edges_checked:
+            self._edges_checked = True
+            result_hashes = [r["chunk_hash"] for r in results]
+            if self._edges.is_empty_for(result_hashes) and self._store.count() > 0:
+                logger.warning("graph mode on but no edges — run `memsearch graph rebuild`")
+        return self._graph_expand(results, top_k=fetch_k, filter_expr=filter_expr)
+
+    async def search_many(
+        self,
+        queries: list[str],
+        *,
+        top_k: int = 10,
+        source_prefix: str | Path | None = None,
+    ) -> list[dict[str, Any]]:
+        """Search several query variants in ONE pass and return a unified ranking.
+
+        Collapses the plugin's former three-process recall (one ``search`` process
+        per variant, each reloading the embedder + reranker + Milvus connection)
+        into a single in-process call: the embedder and reranker load once and the
+        union is reranked once.
+
+        Candidates are unioned across variants by ``chunk_hash``, keeping the record
+        with the highest first-stage score (RRF and graph-fused scores are both
+        normalised to ``[0, 1]``, so the cross-variant comparison is well-defined).
+        Each surviving candidate is reranked against the variant that retrieved it
+        best — grouped so the whole union is reranked exactly once — then the merged
+        list is globally re-sorted before recency damping and the per-source cap.
+
+        Falls back to :meth:`search` for a single (or single non-empty) query so the
+        two paths stay behaviourally identical there.
+        """
+        queries = [q for q in queries if q and q.strip()]
+        if not queries:
+            return []
+        if len(queries) == 1:
+            return await self.search(queries[0], top_k=top_k, source_prefix=source_prefix)
+
+        filter_expr = self._source_prefix_filter(source_prefix)
+        post_stages = bool(self._reranker_model) or self._recency_weight > 0 or self._max_per_source > 0
+        fetch_k = top_k * self._fetch_multiplier if post_stages else top_k
+
+        embeddings = await self._embedder.embed(queries)
+
+        # Union by chunk_hash: keep the record (and the variant) that scored it
+        # highest at first stage. `score` here is post-graph-expand when graph mode
+        # is on, so all compared scores are the same kind.
+        union: dict[str, dict[str, Any]] = {}
+        best_score: dict[str, float] = {}
+        best_query: dict[str, str] = {}
+        for query, emb in zip(queries, embeddings, strict=True):
+            results = self._store.search(emb, query_text=query, top_k=fetch_k, filter_expr=filter_expr)
+            results = self._expand_with_edges(results, fetch_k=fetch_k, filter_expr=filter_expr)
+            for r in results:
+                h = r["chunk_hash"]
+                if h not in best_score or r["score"] > best_score[h]:
+                    best_score[h] = r["score"]
+                    best_query[h] = query
+                    union[h] = r
+        if not union:
+            return []
+
+        if self._reranker_model:
+            from .reranker import rerank
+
+            # Group by best-variant so each candidate is judged by the cross-encoder
+            # against the query that actually surfaced it (a keyword variant's hit is
+            # not penalised against a paraphrase). Total rerank work == |union| pairs.
+            by_query: dict[str, list[dict[str, Any]]] = {}
+            for h, r in union.items():
+                by_query.setdefault(best_query[h], []).append(r)
+            candidates: list[dict[str, Any]] = []
+            for q, group in by_query.items():
+                candidates.extend(rerank(q, group, model_name=self._reranker_model, top_k=0))
+        else:
+            candidates = list(union.values())
+
+        # Per-group rerank leaves the concatenation only locally sorted; recency and
+        # the per-source cap both assume a globally score-sorted input, so sort here.
+        candidates.sort(key=lambda r: r["score"], reverse=True)
+        if self._recency_weight > 0:
+            candidates = _apply_recency(
+                candidates, weight=self._recency_weight, half_life_days=self._recency_half_life_days
+            )
+        if self._max_per_source > 0:
+            candidates = _cap_per_source(candidates, self._max_per_source)
+        return candidates[:top_k]
 
     def _graph_expand(
         self, base: list[dict[str, Any]], *, top_k: int, filter_expr: str
@@ -763,8 +962,6 @@ class MemSearch:
         # _watch_lock serializes them onto this single persistent loop.
         self._watch_loop = loop
         self._watch_on_event = on_event
-        self._watch_lock = threading.Lock()
-
         fw_kwargs: dict[str, Any] = {}
         if debounce_ms is not None:
             fw_kwargs["debounce_ms"] = debounce_ms
@@ -778,7 +975,16 @@ class MemSearch:
 
     @property
     def store(self) -> MilvusStore:
+        """Underlying store handle.
+
+        Read-only by convention outside ``MemSearch``; all mutations should go
+        through ``MemSearch`` methods that hold ``_watch_lock`` when watching.
+        """
         return self._store
+
+    @property
+    def write_lock(self) -> threading.Lock:
+        return self._watch_lock
 
     def close(self) -> None:
         """Release resources."""

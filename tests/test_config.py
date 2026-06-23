@@ -8,6 +8,7 @@ import pytest
 import tomli_w
 
 from memsearch.config import (
+    DaemonConfig,
     EmbeddingConfig,
     MemSearchConfig,
     PluginsConfig,
@@ -32,6 +33,10 @@ def test_default_config():
     assert cfg.chunking.max_chunk_size == 1500
     assert cfg.chunking.overlap_lines == 2
     assert cfg.watch.debounce_ms == 1500
+    assert cfg.daemon.enabled is True
+    assert cfg.daemon.warmup is True
+    assert cfg.daemon.connect_timeout_s == 2.0
+    assert cfg.daemon.request_timeout_s == 15.0
     assert cfg.compact.llm_provider == "openai"
     assert cfg.llm.providers == {}
     assert cfg.plugins.claude_code.summarize.provider == ""
@@ -667,3 +672,45 @@ def test_search_unknown_key_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
     with pytest.raises(KeyError):
         set_config_value("search.bogus_field", "1")
+
+
+def test_daemon_defaults_omitted_from_saved_config() -> None:
+    """Default daemon settings should not be persisted into every config dump."""
+    from memsearch.config import config_to_dict
+
+    data = config_to_dict(MemSearchConfig())
+    assert "daemon" not in data
+
+
+def test_daemon_section_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A [daemon] TOML table resolves into DaemonConfig through resolve_config."""
+    global_cfg = tmp_path / "global.toml"
+    save_config(
+        {"daemon": {"enabled": False, "warmup": False, "connect_timeout_s": 0.25, "request_timeout_s": 3.5}},
+        global_cfg,
+    )
+    monkeypatch.setattr("memsearch.config.GLOBAL_CONFIG_PATH", global_cfg)
+    monkeypatch.setattr("memsearch.config.PROJECT_CONFIG_PATH", tmp_path / "nope.toml")
+
+    cfg = resolve_config()
+    assert cfg.daemon == DaemonConfig(enabled=False, warmup=False, connect_timeout_s=0.25, request_timeout_s=3.5)
+
+
+def test_daemon_set_config_value_coercion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """set_config_value coerces daemon bool and float leaves."""
+    cfg_path = tmp_path / "config.toml"
+    monkeypatch.setattr("memsearch.config.GLOBAL_CONFIG_PATH", cfg_path)
+    monkeypatch.setattr("memsearch.config.PROJECT_CONFIG_PATH", tmp_path / "nope.toml")
+
+    set_config_value("daemon.enabled", "false")
+    set_config_value("daemon.warmup", "false")
+    set_config_value("daemon.connect_timeout_s", "0.5")
+    set_config_value("daemon.request_timeout_s", "7")
+
+    data = load_config_file(cfg_path)
+    assert data["daemon"]["enabled"] is False
+    assert data["daemon"]["warmup"] is False
+    assert data["daemon"]["connect_timeout_s"] == 0.5
+    assert isinstance(data["daemon"]["connect_timeout_s"], float)
+    assert data["daemon"]["request_timeout_s"] == 7.0
+    assert isinstance(data["daemon"]["request_timeout_s"], float)

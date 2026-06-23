@@ -24,16 +24,17 @@ Search for memories relevant to: $ARGUMENTS
    - *Keyword-heavy*: exact identifiers, file names, error strings (feeds the BM25 leg).
    - *Temporal* (only when the question implies time — "recently", "last week", "what did I decide about X"): include date cues or session references.
 
-3. **Search**: for each variant run (max 3 calls total):
+3. **Search**: run ONE search with all variants passed as separate quoted arguments. The CLI runs them in a single process — loading the embedder and reranker once — and unions + dedups + reranks the variants together:
    ```
-   memsearch search "<variant>" --top-k 15 --compact-output --json-output --consistency Strong --collection <collection name above>
+   memsearch search "<variant1>" "<variant2>" "<variant3>" --top-k 15 --compact-output --json-output --consistency Strong --collection <collection name above>
    ```
    - If `memsearch` is not found, try `uvx memsearch` instead.
+   - Passing multiple queries returns a SINGLE unioned, deduped, reranked result set — do not merge results yourself.
    - `--consistency Strong` ensures memories written by the watcher earlier this session are immediately visible on remote Milvus (no-op on Milvus Lite).
    - Each result is a compact object: `{"chunk_hash": "...", "score": 0.81, "date": "...", "source": "...", "heading": "...", "preview": "<first ~100 chars>"}`. Use `heading`, `date`, and `preview` to judge relevance without fetching full content.
-   - If `memsearch search` fails with `Error: No such option: --compact-output`, the installed `memsearch` predates this flag. Fall back to: `memsearch search "<query>" --top-k 5 --json-output --consistency Strong --collection <collection name above>` (one query only, full results).
+   - **Fallback for older binaries**: if the call errors with `Got unexpected extra argument` (multi-query unsupported) OR `No such option: --compact-output`, the installed `memsearch` predates these. Run ONE variant only: `memsearch search "<variant1>" --top-k 5 --json-output --consistency Strong --collection <collection name above>`.
 
-4. **Union + dedup**: merge results across variants by `chunk_hash`, keeping the highest score per hash. Chunks hit by multiple variants are preferred candidates for the next step.
+4. **Review**: the CLI already unioned, deduped, and reranked across the variants, so just scan the returned list and pick the chunks worth expanding (the single-query fallback returns one set — same handling).
 
 5. **Filter-before-expand**: from the compact summaries, pick the 3–5 most promising hashes and run:
    ```

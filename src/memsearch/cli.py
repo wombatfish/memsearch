@@ -283,6 +283,80 @@ def _compact_preview(content: str) -> str:
     return ""
 
 
+def _absolute_path_arg(path_value: str | None) -> str | None:
+    if path_value and not os.path.isabs(path_value):
+        return os.path.abspath(path_value)
+    return path_value
+
+
+def _render_search_results(results: list[dict], *, compact_output: bool, json_output: bool) -> None:
+    from .core import _source_date
+
+    if compact_output:
+        slim = []
+        for r in results:
+            src = r.get("source", "")
+            d = _source_date(src)
+            slim.append(
+                {
+                    "chunk_hash": r.get("chunk_hash", ""),
+                    "score": round(float(r.get("score", 0.0)), 4),
+                    "date": d.isoformat() if d else "",
+                    "source": src if json_output else os.path.basename(src),
+                    "heading": r.get("heading", ""),
+                    "preview": _compact_preview(r.get("content", "")),
+                }
+            )
+        if json_output:
+            click.echo(json.dumps(slim, indent=2, ensure_ascii=False))
+        elif not slim:
+            click.echo("No results found.")
+        else:
+            for i, s in enumerate(slim, 1):
+                date_str = s["date"] or "          "
+                sep = " — " if s["preview"] else ""
+                click.echo(
+                    f"{i:2d}. {s['chunk_hash']}  {s['score']:.4f}  {date_str}  {s['heading']}{sep}{s['preview']}"
+                )
+        return
+
+    if json_output:
+        click.echo(json.dumps(results, indent=2, ensure_ascii=False))
+        return
+    if not results:
+        click.echo("No results found.")
+        return
+    for i, r in enumerate(results, 1):
+        score = r.get("score", 0)
+        source = r.get("source", "?")
+        heading = r.get("heading", "")
+        content = r.get("content", "")
+        click.echo(f"\n--- Result {i} (score: {score:.4f}) ---")
+        click.echo(f"Source: {source}")
+        if heading:
+            click.echo(f"Heading: {heading}")
+        if len(content) > 500:
+            click.echo(content[:500])
+            chunk_hash = r.get("chunk_hash", "")
+            click.echo(f"  ... [truncated, run 'memsearch expand {chunk_hash}' for full content]")
+        else:
+            click.echo(content)
+
+
+def _render_expand_result(result: dict, *, json_output: bool) -> None:
+    if json_output:
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    click.echo(f"Source: {result['source']} (lines {result['start_line']}-{result['end_line']})")
+    if result.get("heading"):
+        click.echo(f"Heading: {result['heading']}")
+    anchor = result.get("anchor")
+    if anchor:
+        click.echo(f"Session: {anchor['session']}  Turn: {anchor['turn']}")
+        click.echo(f"Transcript: {anchor['transcript']}")
+    click.echo(f"\n{result['content']}")
+
+
 def _plugin_summarize_config(cfg: MemSearchConfig, plugin: str) -> dict:
     """Return TOML-facing summarize config for a plugin platform."""
     plugins = config_to_dict(cfg).get("plugins", {})
@@ -433,7 +507,7 @@ def index(
 
 
 @cli.command()
-@click.argument("query")
+@click.argument("queries", nargs=-1, required=True)
 @click.option("--top-k", "-k", default=None, type=click.IntRange(min=1), help="Number of results.")
 @click.option(
     "--source-prefix",
@@ -464,8 +538,9 @@ def index(
 )
 @click.option("--compact-output", is_flag=True, help="Slim index-first view (chunk_hash/score/date/heading/preview) for filter-before-expand.")
 @click.option("--json-output", "-j", is_flag=True, help="Output as JSON.")
+@click.option("--no-daemon", is_flag=True, default=False, help="Bypass the watch-hosted search daemon for this invocation.")
 def search(
-    query: str,
+    queries: tuple[str, ...],
     top_k: int | None,
     source_prefix: str | None,
     provider: str | None,
@@ -483,9 +558,16 @@ def search(
     max_per_source: int | None,
     compact_output: bool,
     json_output: bool,
+    no_daemon: bool,
 ) -> None:
-    """Search indexed memory for QUERY."""
-    from .core import MemSearch, _source_date
+    """Search indexed memory for QUERIES.
+
+    Pass one query for a normal search. Pass several (e.g. semantic / keyword /
+    temporal variants of one intent) to run them in a SINGLE process: the embedder
+    and reranker load once, candidates are unioned and deduped across variants, and
+    the union is reranked once into one ranked result set — no client-side merge.
+    """
+    from .core import MemSearch
 
     cfg = _safe_resolve_config(
         _build_cli_overrides(
@@ -504,61 +586,32 @@ def search(
             max_per_source=max_per_source,
         )
     )
+    source_prefix = _absolute_path_arg(source_prefix)
+    if cfg.daemon.enabled and not no_daemon:
+        from .daemon import daemon_request
+
+        result = daemon_request(
+            cfg.milvus.collection,
+            {
+                "op": "search",
+                "queries": list(queries),
+                "top_k": top_k or 5,
+                "source_prefix": source_prefix,
+            },
+            cfg,
+        )
+        if result is not None:
+            _render_search_results(result["results"], compact_output=compact_output, json_output=json_output)
+            return
+
     ms = None
     try:
         ms = MemSearch(**_cfg_to_memsearch_kwargs(cfg))
-        results = _run(ms.search(query, top_k=top_k or 5, source_prefix=source_prefix))
-        if compact_output:
-            # Index-first slim view: filter-before-fetch (claude-mem pattern). Lets a
-            # caller scan many candidates cheaply, then `expand` only the chosen few.
-            slim = []
-            for r in results:
-                src = r.get("source", "")
-                d = _source_date(src)
-                slim.append(
-                    {
-                        "chunk_hash": r.get("chunk_hash", ""),
-                        "score": round(float(r.get("score", 0.0)), 4),
-                        "date": d.isoformat() if d else "",
-                        # Full path in JSON (machine-consumable); basename in text (skim).
-                        "source": src if json_output else os.path.basename(src),
-                        "heading": r.get("heading", ""),
-                        "preview": _compact_preview(r.get("content", "")),
-                    }
-                )
-            if json_output:
-                click.echo(json.dumps(slim, indent=2, ensure_ascii=False))
-            elif not slim:
-                click.echo("No results found.")
-            else:
-                for i, s in enumerate(slim, 1):
-                    date_str = s["date"] or "          "
-                    sep = " — " if s["preview"] else ""
-                    click.echo(
-                        f"{i:2d}. {s['chunk_hash']}  {s['score']:.4f}  {date_str}  {s['heading']}{sep}{s['preview']}"
-                    )
-            return
-        if json_output:
-            click.echo(json.dumps(results, indent=2, ensure_ascii=False))
+        if len(queries) == 1:
+            results = _run(ms.search(queries[0], top_k=top_k or 5, source_prefix=source_prefix))
         else:
-            if not results:
-                click.echo("No results found.")
-                return
-            for i, r in enumerate(results, 1):
-                score = r.get("score", 0)
-                source = r.get("source", "?")
-                heading = r.get("heading", "")
-                content = r.get("content", "")
-                click.echo(f"\n--- Result {i} (score: {score:.4f}) ---")
-                click.echo(f"Source: {source}")
-                if heading:
-                    click.echo(f"Heading: {heading}")
-                if len(content) > 500:
-                    click.echo(content[:500])
-                    chunk_hash = r.get("chunk_hash", "")
-                    click.echo(f"  ... [truncated, run 'memsearch expand {chunk_hash}' for full content]")
-                else:
-                    click.echo(content)
+            results = _run(ms.search_many(list(queries), top_k=top_k or 5, source_prefix=source_prefix))
+        _render_search_results(results, compact_output=compact_output, json_output=json_output)
     except MilvusException as e:
         click.echo(f"Milvus error (code {e.code}): {e.message}", err=True)
         raise SystemExit(1) from None
@@ -587,12 +640,14 @@ def search(
     "--lines", "-n", default=None, type=click.IntRange(min=0), help="Show N lines before/after instead of full section."
 )
 @click.option("--json-output", "-j", is_flag=True, help="Output as JSON.")
+@click.option("--no-daemon", is_flag=True, default=False, help="Bypass the watch-hosted search daemon for this invocation.")
 @_common_options
 def expand(
     chunk_hash: str,
     section: bool,
     lines: int | None,
     json_output: bool,
+    no_daemon: bool,
     provider: str | None,
     model: str | None,
     batch_size: int | None,
@@ -625,122 +680,27 @@ def expand(
             milvus_token=milvus_token,
         )
     )
-    with _milvus_store(cfg) as store:
-        chunks = store.query(filter_expr=f'chunk_hash == "{chunk_hash}"')
-        if not chunks:
-            click.echo(f"Chunk not found: {chunk_hash}", err=True)
-            sys.exit(1)
+    if cfg.daemon.enabled and not no_daemon:
+        from .daemon import daemon_request
 
-        chunk = chunks[0]
-        try:
-            source = chunk["source"]
-            start_line = chunk["start_line"]
-            end_line = chunk["end_line"]
-        except KeyError as e:
-            # Required fields can be absent on schema corruption or a concurrent delete.
-            # KeyError is NOT caught by the outer MilvusException handler, so guard it
-            # here for a friendly message instead of a raw traceback.
-            click.echo(f"Malformed chunk in database: missing field {e}", err=True)
-            sys.exit(1)
-        heading = chunk.get("heading", "")
-        heading_level = chunk.get("heading_level", 0)
-
-        source_path = Path(source)
-        if not source_path.exists():
-            click.echo(f"Source file not found: {source}", err=True)
-            sys.exit(1)
-
-        all_lines = source_path.read_text(encoding="utf-8", errors="replace").splitlines()
-
-        if lines is not None:
-            # Show N lines before/after the chunk
-            ctx_start = max(0, start_line - 1 - lines)
-            ctx_end = min(len(all_lines), end_line + lines)
-            expanded = "\n".join(all_lines[ctx_start:ctx_end])
-            expanded_start = ctx_start + 1
-            expanded_end = ctx_end
-        elif section:
-            # Show full section under the same heading (default)
-            expanded, expanded_start, expanded_end = _extract_section(
-                all_lines,
-                start_line,
-                heading_level,
-            )
-        else:
-            # --no-section without --lines: show only the chunk's own lines
-            expanded = "\n".join(all_lines[start_line - 1 : end_line])
-            expanded_start = start_line
-            expanded_end = end_line
-
-        # Parse any anchor comments in the expanded text
-        anchor_match = re.search(
-            r"<!--\s*session:(\S+)\s+turn:(\S+)\s+transcript:(\S+)\s*-->",
-            expanded,
+        result = daemon_request(
+            cfg.milvus.collection,
+            {"op": "expand", "chunk_hash": chunk_hash, "section": section, "lines": lines},
+            cfg,
         )
-        anchor = {}
-        if anchor_match:
-            anchor = {
-                "session": anchor_match.group(1),
-                "turn": anchor_match.group(2),
-                "transcript": anchor_match.group(3),
-            }
+        if result is not None:
+            _render_expand_result({k: v for k, v in result.items() if k != "ok"}, json_output=json_output)
+            return
 
-        if json_output:
-            result = {
-                "chunk_hash": chunk_hash,
-                "source": source,
-                "heading": heading,
-                "start_line": expanded_start,
-                "end_line": expanded_end,
-                "content": expanded,
-            }
-            if anchor:
-                result["anchor"] = anchor
-            click.echo(json.dumps(result, indent=2, ensure_ascii=False))
-        else:
-            click.echo(f"Source: {source} (lines {expanded_start}-{expanded_end})")
-            if heading:
-                click.echo(f"Heading: {heading}")
-            if anchor:
-                click.echo(f"Session: {anchor['session']}  Turn: {anchor['turn']}")
-                click.echo(f"Transcript: {anchor['transcript']}")
-            click.echo(f"\n{expanded}")
+    from .core import _build_expand_result
 
-
-def _extract_section(
-    all_lines: list[str],
-    start_line: int,
-    heading_level: int,
-) -> tuple[str, int, int]:
-    """Extract the full section containing the chunk.
-
-    Walks backward to find the section heading, then forward to the next
-    heading of equal or higher level (or EOF).
-    """
-    # Find section start — walk backward to the heading
-    section_start = start_line - 1  # 0-indexed
-    if heading_level > 0:
-        for i in range(start_line - 2, -1, -1):
-            line = all_lines[i]
-            if line.startswith("#"):
-                level = len(line) - len(line.lstrip("#"))
-                if level <= heading_level:
-                    section_start = i
-                    break
-
-    # Find section end — walk forward to the next heading of same or higher level
-    section_end = len(all_lines)
-    if heading_level > 0:
-        for i in range(start_line, len(all_lines)):
-            line = all_lines[i]
-            if line.startswith("#"):
-                level = len(line) - len(line.lstrip("#"))
-                if level <= heading_level:
-                    section_end = i
-                    break
-
-    content = "\n".join(all_lines[section_start:section_end])
-    return content, section_start + 1, section_end
+    with _milvus_store(cfg) as store:
+        try:
+            result = _build_expand_result(store, chunk_hash, section=section, lines=lines, cfg=cfg)
+        except (ValueError, FileNotFoundError) as e:
+            click.echo(str(e), err=True)
+            sys.exit(1)
+        _render_expand_result(result, json_output=json_output)
 
 
 def _spawn_detached_watch() -> None:
@@ -902,6 +862,7 @@ def watch(
 
     ms = None
     watcher = None
+    daemon = None
     try:
         ms = MemSearch(list(paths), **_cfg_to_memsearch_kwargs(cfg), description=description or "")
 
@@ -915,6 +876,11 @@ def watch(
 
         click.echo(f"Watching {len(paths)} path(s) for changes... (Ctrl+C to stop)")
         watcher = ms.watch(on_event=_on_event, debounce_ms=cfg.watch.debounce_ms)
+        if cfg.daemon.enabled:
+            from .daemon import SearchDaemon
+
+            daemon = SearchDaemon(ms, cfg)
+            daemon.start()
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
@@ -923,6 +889,8 @@ def watch(
         click.echo(f"Milvus error (code {e.code}): {e.message}", err=True)
         raise SystemExit(1) from None
     finally:
+        if daemon is not None:
+            daemon.stop()
         if watcher is not None:
             watcher.stop()
         if ms is not None:
@@ -1192,6 +1160,35 @@ def graph_rebuild(
             ms.close()
         if lock is not None:
             lock.release()
+
+
+# ======================================================================
+# Daemon command group
+# ======================================================================
+
+
+@cli.group("daemon")
+def daemon_group() -> None:
+    """Inspect the watch-hosted search daemon."""
+
+
+@daemon_group.command("status")
+@click.option("--collection", "-c", default=None, help="Milvus collection name.")
+def daemon_status(collection: str | None) -> None:
+    """Show whether the search daemon is live for the collection."""
+    from .daemon import DaemonKey, daemon_address, ping_daemon
+
+    cfg = _safe_resolve_config(_build_cli_overrides(collection=collection))
+    info = ping_daemon(cfg.milvus.collection, timeout_s=0.5)
+    address, _family = daemon_address(cfg.milvus.collection)
+    key_path = DaemonKey(cfg.milvus.collection).path
+    if info is None:
+        click.echo(f"Not running: {cfg.milvus.collection}")
+        return
+    click.echo(f"Running (live): {info['collection']} pid={info['pid']} provider={info['provider']}")
+    click.echo(f"Address: {address}")
+    if key_path.exists():
+        click.echo(f"Key mtime: {key_path.stat().st_mtime:.0f}")
 
 
 # ======================================================================

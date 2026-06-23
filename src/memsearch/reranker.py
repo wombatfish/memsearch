@@ -28,6 +28,12 @@ DEFAULT_RERANKER = "Alibaba-NLP/gte-reranker-modernbert-base"
 # Cap cross-encoder sequence length to avoid OOM on long documents.
 _MAX_RERANK_TOKENS = 512
 
+# Sub-batch size for length-bucketed reranking (see _rerank_onnx). Tuned on a
+# 32-core CPU with the int8 gte-reranker-modernbert-base: 8 beat 16/32 because
+# tighter per-bucket padding outweighs the extra session.run dispatches. Adjust
+# here if profiling a different model/CPU shifts the crossover.
+_RERANK_BATCH = 8
+
 
 # ======================================================================
 # Backend detection
@@ -166,34 +172,54 @@ def _extract_scores(logits: np.ndarray) -> list[float]:
 
 
 def _rerank_onnx(query: str, results: list[dict[str, Any]], model_name: str, top_k: int) -> list[dict[str, Any]]:
-    """Rerank using ONNX Runtime backend."""
+    """Rerank using ONNX Runtime backend.
+
+    Length-bucketed: pairs are processed shortest-first in fixed-size sub-batches,
+    each padded only to ITS OWN max token length rather than the whole batch's max.
+    The int8 cross-encoder does not fully mask pad tokens (a pair scored padded to
+    512 differs from the same pair padded to its own length), so the old
+    single-batch pad-to-global-max approach both wasted compute on long pads and let
+    pad tokens contaminate scores. Minimal per-bucket padding is markedly faster and
+    closer to the zero-padding score. Scores are mapped back to the ORIGINAL result
+    order before zipping, so each score lands on its own result.
+    """
     model = _load_onnx_model(model_name)
 
     pairs = [(query, r["content"]) for r in results]
     encoded = [model.tokenizer.encode(*pair) for pair in pairs]
+    n = len(encoded)
+    scores: list[float] = [0.0] * n
 
-    max_len = max(len(e.ids) for e in encoded)
-    batch_size = len(encoded)
+    # Stable ascending sort by token length; ties keep original order (determinism).
+    order = sorted(range(n), key=lambda i: len(encoded[i].ids))
+    for start in range(0, n, _RERANK_BATCH):
+        idxs = order[start : start + _RERANK_BATCH]
+        max_len = max(len(encoded[i].ids) for i in idxs)
+        bs = len(idxs)
 
-    input_ids = np.zeros((batch_size, max_len), dtype=np.int64)
-    attention_mask = np.zeros((batch_size, max_len), dtype=np.int64)
-    token_type_ids = np.zeros((batch_size, max_len), dtype=np.int64)
+        input_ids = np.zeros((bs, max_len), dtype=np.int64)
+        attention_mask = np.zeros((bs, max_len), dtype=np.int64)
+        token_type_ids = np.zeros((bs, max_len), dtype=np.int64)
 
-    for i, enc in enumerate(encoded):
-        length = len(enc.ids)
-        input_ids[i, :length] = enc.ids
-        attention_mask[i, :length] = enc.attention_mask
-        token_type_ids[i, :length] = enc.type_ids
+        for j, i in enumerate(idxs):
+            enc = encoded[i]
+            length = len(enc.ids)
+            input_ids[j, :length] = enc.ids
+            attention_mask[j, :length] = enc.attention_mask
+            token_type_ids[j, :length] = enc.type_ids
 
-    feed: dict[str, np.ndarray] = {
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-    }
-    if "token_type_ids" in model.input_names:
-        feed["token_type_ids"] = token_type_ids
+        feed: dict[str, np.ndarray] = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+        }
+        if "token_type_ids" in model.input_names:
+            feed["token_type_ids"] = token_type_ids
 
-    logits = model.session.run(None, feed)[0]
-    scores = _extract_scores(logits)
+        logits = model.session.run(None, feed)[0]
+        batch_scores = _extract_scores(logits)
+        # Un-permute: batch_scores[j] belongs to original result idxs[j].
+        for j, i in enumerate(idxs):
+            scores[i] = batch_scores[j]
 
     scored = [{**r, "score": float(s)} for r, s in zip(results, scores, strict=True)]
     scored.sort(key=lambda x: x["score"], reverse=True)

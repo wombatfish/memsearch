@@ -27,8 +27,8 @@ PROJECT_CONFIG_PATH = Path(".memsearch.toml")
 
 # Fields that should be parsed as int when set via CLI strings
 _INT_FIELDS = {"max_chunk_size", "overlap_lines", "debounce_ms", "batch_size", "min_interval_hours", "seed_k", "fanout", "similar_top_n", "max_per_source", "fetch_multiplier"}
-_BOOL_FIELDS = {"enabled", "structural"}
-_FLOAT_FIELDS = {"weight", "similar_threshold", "recency_weight", "recency_half_life_days"}
+_BOOL_FIELDS = {"enabled", "structural", "warmup"}
+_FLOAT_FIELDS = {"weight", "similar_threshold", "recency_weight", "recency_half_life_days", "connect_timeout_s", "request_timeout_s"}
 
 
 @dataclass
@@ -74,6 +74,14 @@ class WatchConfig:
 @dataclass
 class RerankerConfig:
     model: str = ""  # empty = disabled; set to model ID to enable
+
+
+@dataclass
+class DaemonConfig:
+    enabled: bool = True
+    warmup: bool = True
+    connect_timeout_s: float = 2.0
+    request_timeout_s: float = 15.0
 
 
 @dataclass
@@ -199,6 +207,7 @@ class MemSearchConfig:
     chunking: ChunkingConfig = field(default_factory=ChunkingConfig)
     watch: WatchConfig = field(default_factory=WatchConfig)
     reranker: RerankerConfig = field(default_factory=RerankerConfig)
+    daemon: DaemonConfig = field(default_factory=DaemonConfig)
     graph: GraphConfig = field(default_factory=GraphConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
@@ -214,6 +223,7 @@ _SECTION_CLASSES: dict[str, type] = {
     "chunking": ChunkingConfig,
     "watch": WatchConfig,
     "reranker": RerankerConfig,
+    "daemon": DaemonConfig,
     "graph": GraphConfig,
     "search": SearchConfig,
     "llm": LLMConfig,
@@ -445,6 +455,8 @@ def config_to_dict(cfg: MemSearchConfig) -> dict[str, Any]:
     """Convert a MemSearchConfig to a nested dict (for saving)."""
     data = asdict(cfg)
     data["plugins"] = _plugins_to_dict(cfg.plugins)
+    if cfg.daemon == DaemonConfig():
+        data.pop("daemon", None)
     return data
 
 
