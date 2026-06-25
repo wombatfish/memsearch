@@ -28,18 +28,25 @@ E:\
     ├── src\memsearch\ ...
     ├── uv.lock
     └── _backfill\                                ← YOU create this folder
-        └── memsearch-global\                     ← copy of C:\Users\dave\.claude\memsearch-global
-            ├── memory\
-            │   ├── 2026-06-08.md                 (legacy top-level logs)
-            │   └── <repo>\<branch>\*.md          (per-project / per-branch logs)
-            ├── PROJECT.md
-            ├── USER.md
-            └── CORRECTIONS.md
+        ├── memsearch-global\                     ← copy of C:\Users\dave\.claude\memsearch-global
+        │   ├── memory\
+        │   │   ├── 2026-06-08.md                 (legacy top-level logs)
+        │   │   └── <repo>\<branch>\*.md          (per-project / per-branch logs)
+        │   ├── PROJECT.md
+        │   ├── USER.md
+        │   └── CORRECTIONS.md
+        └── scripts\                              ← the conversation-backfill program
+            ├── memsearch-backfill-claude.py      (conversation-backfill program)
+            ├── _backfill_*.py                    (its helper modules)
+            └── memsearch-bucket-rules.json       (optional repo→bucket rules, if present)
 ```
 
 - `memsearch-global\` holds **the actual saved memories** — this is the data the new PC
   backfills. If you leave `_backfill\` out, the new PC still gets a *working* plugin, but
   with **no past memories** — it will only remember things from then on.
+- `scripts\` holds the **conversation-backfill program** the new PC uses in Part 7 to load
+  *its own* past Claude conversations. Leave it out and the new PC still gets a working
+  plugin with your carried-over memories, but Part 7 won't be available there.
 - *(Optional, offline installs only)* also drop `milvus-images.tar` at the drive root
   (`E:\milvus-images.tar`) if the target PC will have **no internet** — see below.
 
@@ -80,6 +87,37 @@ dir -Recurse -Filter *.md "$drive\memsearch\_backfill\memsearch-global\memory" |
 
 You should see dated `.md` files (e.g. `2026-06-08.md`) — some at the top level, most under
 `<repo>\<branch>\` subfolders. ✅
+
+## Step B2 — Add the conversation-backfill program into `_backfill\scripts\`
+
+This is the program the new PC runs in Part 7 to load *its own* past Claude conversations.
+Skip it only if you don't want that capability on the new PC.
+
+```powershell
+$drive = "E:"
+$dst = "$drive\memsearch\_backfill\scripts"
+New-Item -ItemType Directory -Force $dst | Out-Null
+
+# The backfill program + its helper modules only (not the rest of ~\.claude\scripts).
+Copy-Item "$env:USERPROFILE\.claude\scripts\memsearch-backfill-claude.py" $dst -Force
+Copy-Item "$env:USERPROFILE\.claude\scripts\_backfill_*.py"                $dst -Force
+
+# Bucket rules — keeps repo→bucket mapping consistent across machines (copy if you have it).
+if (Test-Path "$env:USERPROFILE\.claude\memsearch-bucket-rules.json") {
+  Copy-Item "$env:USERPROFILE\.claude\memsearch-bucket-rules.json" $dst -Force
+}
+```
+
+**Check it worked:**
+
+```powershell
+dir "$drive\memsearch\_backfill\scripts"
+```
+
+You should see `memsearch-backfill-claude.py`, the `_backfill_*.py` helpers, and (if you had
+one) `memsearch-bucket-rules.json`. ✅ (If `~\.claude\scripts` doesn't exist on this PC, the
+program isn't installed here — there's nothing to carry, and the new PC simply won't have
+Part 7.)
 
 ## Step C *(optional)* — Bundle the database images for an offline install
 

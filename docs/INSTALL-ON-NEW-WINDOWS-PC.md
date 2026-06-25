@@ -31,11 +31,15 @@ E:\
     ├── pyproject.toml
     ├── plugins\claude-code\podman\docker-compose.yml   ← Milvus recipe (in the repo)
     ├── src\memsearch\ ...
-    └── _backfill\memsearch-global\              ← the saved memories you'll backfill
+    └── _backfill\
+        ├── memsearch-global\                    ← the saved memories you'll backfill
+        └── scripts\                             ← the conversation-backfill program (Part 7)
 ```
 
 If `_backfill\memsearch-global\` is missing you'll still get a *working* plugin, but with
-**no past memories** to backfill. *(Offline installs:* `E:\milvus-images.tar` *should also
+**no past memories** to backfill. If `_backfill\scripts\` is missing you'll still get a
+working plugin and your carried-over memories, but Part 7 (loading *this* PC's own past
+conversations) won't be available. *(Offline installs:* `E:\milvus-images.tar` *should also
 be present — see Step 5.)*
 
 ---
@@ -440,6 +444,95 @@ Close and reopen **Claude Code** one last time. From now on:
 
 ---
 
+# Part 7 — (Optional) Load *this* PC's own past conversations
+
+Everything above loaded the memories **carried over from the original PC**. But this PC
+has its *own* past Claude Code conversations (the raw chat logs) that aren't in memory yet.
+This step reads those, writes a short summary of each, and adds them so Claude can recall
+this PC's history too. It's optional, and it's **separate** from the Step 11 backfill
+(Step 11 loaded already-summarized notes; this reads raw conversation logs).
+
+> ⚠️ **CLAUDE CODE — READ THIS. You must do the following before you tell the user the
+> install is finished.**
+>
+> The install is otherwise complete. Now present this offer to the user **in plain
+> language** and wait for their answer:
+>
+> > "I can also load **this** computer's own past Claude conversations into memory (separate
+> > from the memories I just restored from the other PC). It's optional and may take a few
+> > minutes up to about half an hour, because I summarize each past conversation one at a
+> > time. Want me to do that now?"
+>
+> - **If the user says no:** tell them they can ask anytime by saying *"load this PC's past
+>   conversations into memory"*, then finish. Do **not** run the commands.
+> - **If the user says yes:** run the steps in **Step 13** below using your PowerShell tool,
+>   then report the verification result. Let it run to completion — it spawns short
+>   `claude` summarizer subprocesses per conversation turn, so it is slow but unattended.
+
+## Step 13 — Run the conversation backfill (only after the user agrees)
+
+1. Put the backfill program in place. This prefers the on-disk repo copy (made in Step 5,
+   so it still works if the thumb drive has been removed) and **automatically falls back to
+   the thumb drive** if this PC was installed from an older drive that didn't carry the
+   program. No drive letter to type — it scans the plugged-in removable drives:
+
+   ```powershell
+   # Locate the backfill program: on-disk copy first, else any plugged-in removable drive.
+   $src = "$env:USERPROFILE\memsearch\_backfill\scripts"
+   if (-not (Test-Path "$src\memsearch-backfill-claude.py")) {
+       $src = Get-Volume | Where-Object DriveType -eq 'Removable' |
+           ForEach-Object { "$($_.DriveLetter):\memsearch\_backfill\scripts" } |
+           Where-Object { Test-Path "$_\memsearch-backfill-claude.py" } |
+           Select-Object -First 1
+   }
+   if (-not $src) {
+       throw "Backfill program not found on disk or any plugged-in drive. Plug in the prepared thumb drive (with _backfill\scripts\) and re-run."
+   }
+   New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude" | Out-Null
+   Copy-Item $src "$env:USERPROFILE\.claude\" -Recurse -Force
+   # Bucket rules (bundled alongside the program) — keeps repo→bucket mapping consistent
+   # across your machines. Lands in the default location the program reads.
+   $rules = "$env:USERPROFILE\.claude\scripts\memsearch-bucket-rules.json"
+   if (Test-Path $rules) { Copy-Item $rules "$env:USERPROFILE\.claude\memsearch-bucket-rules.json" -Force }
+   "Copied backfill program from: $src"
+   ```
+
+2. Run the backfill. Replace `ms_memsearch_global_xxxxxxxx` with the collection name from
+   the status line (same name as Step 10):
+
+   ```powershell
+   $col = "ms_memsearch_global_xxxxxxxx"   # <-- your collection name (status line)
+
+   # Memory location (already set in Step 8; re-assert in case this is a fresh window)
+   $env:MEMSEARCH_DIR = "$env:USERPROFILE\.claude\memsearch-global"
+
+   # Without this, every conversation is skipped as "already handled live" — the built-in
+   # cutoff predates this PC's history. Push it to tomorrow so all past chats are included.
+   $env:MEMSEARCH_BACKFILL_DATE_GUARD = (Get-Date).AddDays(1).ToString('yyyy-MM-dd')
+
+   # Pause the live updater so it doesn't fight the backfill, then run it.
+   memsearch watch --stop --collection $col
+   python "$env:USERPROFILE\.claude\scripts\memsearch-backfill-claude.py" --yes
+   ```
+
+   The program reads every past conversation, summarizes each turn, files the notes, and
+   indexes them into the database at the end. It is **safe to re-run** — already-loaded
+   conversations are skipped automatically.
+
+3. **Check it worked.** Search for something you remember discussing on this PC
+   (`--no-daemon` reads the database directly):
+
+   ```powershell
+   memsearch search "something from a past chat on this PC" --collection $col --no-daemon
+   ```
+
+   You should see matching snippets from your old conversations. ✅ The live updater
+   restarts on its own next time you open Claude Code.
+
+🎉 **All done — past conversations from this PC are now searchable.**
+
+---
+
 # If something goes wrong
 
 | Problem | Fix |
@@ -453,6 +546,9 @@ Close and reopen **Claude Code** one last time. From now on:
 | Python errors mentioning the Microsoft Store | You installed Store Python. Uninstall it, install from python.org (Step 2), tick "Add to PATH". |
 | Status line shows **`UPDATE: vX available — run: uv tool install -U 'memsearch[onnx]'`** | Ignore it — this is a **fork**, and that command would install the *stock* PyPI build over it. The `setx MEMSEARCH_NO_UPDATE_CHECK 1` from Step 8 hides the nag; restart Claude to apply it. To actually update a fork, reinstall from the repo (Step 7). |
 | Status line shows `collection: ms_<projectname>_...` instead of `ms_memsearch_global_...` | Claude didn't inherit `MEMSEARCH_DIR`. Confirm Step 8 ran, then **fully close and reopen** Claude Code (not `/clear`). |
+| **Part 7:** `python` says *"can't open file ... memsearch-backfill-claude.py"* | The program wasn't copied. Plug in the prepared thumb drive (the one with `_backfill\scripts\`) and re-run Step 13.1 — it auto-detects the drive. If it still can't find it (`throw` message), the drive was never prepped with the program — re-prep it (PREP guide, Step B2). |
+| **Part 7:** backfill summary shows everything under `skipped: post-install` | The date-guard line didn't run. Re-run the `$env:MEMSEARCH_BACKFILL_DATE_GUARD = ...` line, then the `python ...` line, in the **same** PowerShell window. |
+| **Part 7:** `preflight: LLM probe failed` | The summarizer (`claude`) couldn't be reached. Make sure Claude Code is installed and signed in, then re-run Step 13.2. |
 
 ---
 
@@ -467,3 +563,4 @@ Close and reopen **Claude Code** one last time. From now on:
 9. `/plugin marketplace add` → `/plugin install` → `/reload-plugins` → confirm `[memsearch]` line
 10–11. Backfill: easiest is to **ask Claude** to read its collection name and run it; or by hand: read collection name → `memsearch watch --stop` then `memsearch index ... --replace` → confirm `memsearch search --no-daemon`
 12. Restart Claude — done.
+13. *(Optional, Claude offers this automatically at the end)* Load **this PC's own** past conversations: copy `_backfill\scripts` → `~\.claude\scripts`, set `MEMSEARCH_BACKFILL_DATE_GUARD` to tomorrow, `memsearch watch --stop`, `python ~\.claude\scripts\memsearch-backfill-claude.py --yes`, verify with `memsearch search --no-daemon`.
