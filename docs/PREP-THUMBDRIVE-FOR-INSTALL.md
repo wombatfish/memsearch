@@ -30,8 +30,8 @@ E:\
     └── _backfill\                                ← YOU create this folder
         └── memsearch-global\                     ← copy of C:\Users\dave\.claude\memsearch-global
             ├── memory\
-            │   ├── 2026-06-08.md
-            │   └── ...  (all daily logs)
+            │   ├── 2026-06-08.md                 (legacy top-level logs)
+            │   └── <repo>\<branch>\*.md          (per-project / per-branch logs)
             ├── PROJECT.md
             ├── USER.md
             └── CORRECTIONS.md
@@ -75,10 +75,11 @@ Copy-Item "$env:USERPROFILE\.claude\memsearch-global" `
 **Check it worked:**
 
 ```powershell
-dir "$drive\memsearch\_backfill\memsearch-global\memory"
+dir -Recurse -Filter *.md "$drive\memsearch\_backfill\memsearch-global\memory" | select -First 10
 ```
 
-You should see the dated `.md` files (e.g. `2026-06-08.md`). ✅
+You should see dated `.md` files (e.g. `2026-06-08.md`) — some at the top level, most under
+`<repo>\<branch>\` subfolders. ✅
 
 ## Step C *(optional)* — Bundle the database images for an offline install
 
