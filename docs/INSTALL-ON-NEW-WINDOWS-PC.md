@@ -533,6 +533,42 @@ this PC's history too. It's optional, and it's **separate** from the Step 11 bac
 
 ---
 
+# Environment variables (reference)
+
+You don't set anything by hand *before* starting — the steps above create what's needed.
+This is a map of what's used and when, and the few conditional keys to be aware of.
+
+**Managed by this install (the steps set these for you):**
+
+| Variable | Set in | Purpose |
+|---|---|---|
+| `MEMSEARCH_DIR` | Step 8 (`setx`, persisted) | Points the plugin **and** the backfill at the one global memory collection. ⚠️ `setx` only affects programs started *afterward* — **fully close and reopen Claude Code after Step 8** (not `/clear`) so it inherits this. If it doesn't, the plugin silently falls back to a *per-project* collection and the backfill lands where nothing reads. This is the single most common failure. |
+| `MEMSEARCH_NO_UPDATE_CHECK` | Step 8 (`setx`, persisted) | Silences the status-line "update available" nag, which would otherwise push the stock PyPI build over this fork. |
+| `MEMSEARCH_BACKFILL_DATE_GUARD` | Part 7 / Step 13 (temporary) | Forces the conversation backfill to include this PC's existing history (the built-in cutoff would otherwise skip it all). Lives only for that one PowerShell window. |
+
+**Automatic — already present, nothing to do:** `USERPROFILE` (Windows sets it; the backfill
+locates your history at `%USERPROFILE%\.claude\projects\` through it) and `PATH` (the Step 1–4
+installers add `git`, `python`, `uv`, `memsearch`, and `claude`).
+
+**Conditional keys — normally absent, and the default install needs none of them.** Memory
+summarization (the Stop hook and the Part 7 backfill) uses your **Claude Code subscription**
+(Anthropic Haiku) with **no API key**. Set one of these *only* if a specific path below
+applies and it isn't already set:
+
+- `ANTHROPIC_API_KEY` — **not needed** by default. Set it **only if** you switch the backfill
+  to the API summarizer (`--llm anthropic-api`, e.g. to avoid subscription rate limits on a
+  very large history). ⚠️ **If you intend to use that mode and this key is not already set,
+  set it before running Part 7** — the backfill aborts at preflight without it.
+- `OPENAI_API_KEY` — **not needed** by this install. Only the separate `memsearch compact`
+  command (not used here) would require it, and only because its LLM provider defaults to
+  OpenAI when left unconfigured.
+- `CLAUDE_CONFIG_DIR` — **do not set this.** Its absence is correct and means Claude Code uses
+  the default `~/.claude`. It matters only if it is *already* set to a non-default location on
+  this PC — then the backfill won't auto-find your history and you pass
+  `--claude-home "<that dir>"` to the program in Step 13 instead.
+
+---
+
 # If something goes wrong
 
 | Problem | Fix |
