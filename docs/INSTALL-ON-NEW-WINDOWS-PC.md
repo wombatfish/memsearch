@@ -14,33 +14,38 @@ works for any username.
 
 ---
 
-## Before you start — prepare the thumb drive
+## Before you start — what this needs
 
-This guide assumes you have a thumb drive prepared on the original "dave" PC, containing
-the `memsearch` repo with the saved memories nested inside it at `_backfill\`.
+The memsearch **program, the plugin, and the Milvus recipe are pulled straight from the
+public fork on GitHub** (`wombatfish/memsearch`, branch `qmaster-custom`) during install —
+you do **not** copy the repo onto this PC. So the thumb drive only needs to carry your
+**personal data** (not on GitHub): your saved memories and the conversation-backfill program.
+**This PC needs internet** for the install (to pull the program/plugin from GitHub and the
+database image from the registry).
 
 ➡️ **If the drive isn't prepared yet, do that first:** see
-[PREP-THUMBDRIVE-FOR-INSTALL.md](PREP-THUMBDRIVE-FOR-INSTALL.md). It assembles the exact
-layout this guide expects.
+[PREP-THUMBDRIVE-FOR-INSTALL.md](https://github.com/wombatfish/memsearch/blob/qmaster-custom/docs/PREP-THUMBDRIVE-FOR-INSTALL.md).
 
-Quick sanity check — plug the drive in and confirm it looks like this (`E:` = the drive):
+Quick sanity check — plug the drive in and confirm `_backfill\` is present (`E:` = the drive):
 
 ```
 E:\
-└── memsearch\                                    ← the ENTIRE repo
-    ├── pyproject.toml
-    ├── plugins\claude-code\podman\docker-compose.yml   ← Milvus recipe (in the repo)
-    ├── src\memsearch\ ...
+├── docker-compose.yml                          ← Milvus recipe (offline installs only)
+├── milvus-images.tar                           ← Milvus container images (offline installs only)
+└── memsearch\
     └── _backfill\
         ├── memsearch-global\                    ← the saved memories you'll backfill
         └── scripts\                             ← the conversation-backfill program (Part 7)
 ```
 
+> A drive prepared the **old** way also has the full repo tree alongside `_backfill\` —
+> that's fine, the repo code is simply ignored now (only `_backfill\` is read).
+
 If `_backfill\memsearch-global\` is missing you'll still get a *working* plugin, but with
 **no past memories** to backfill. If `_backfill\scripts\` is missing you'll still get a
 working plugin and your carried-over memories, but Part 7 (loading *this* PC's own past
-conversations) won't be available. *(Offline installs:* `E:\milvus-images.tar` *should also
-be present — see Step 5.)*
+conversations) won't be available. *(Truly offline? Keep the full repo on the drive and use
+the offline notes in Steps 5 and 7;* `E:\milvus-images.tar` *should also be present.)*
 
 ---
 
@@ -180,25 +185,31 @@ inside a small container managed by Podman.
 
 # Part 2 — Start the memory database
 
-## Step 5 — Copy the repo to your PC, then start the database
+## Step 5 — Copy your saved data off the drive, get the recipe, start the database
 
-1. First, copy the whole repo off the thumb drive onto your PC (everything else
-   reads from this copy). **Replace `E:` with your thumb drive's letter** if different
-   (check "This PC" in File Explorer):
+1. Copy your **personal data** (`_backfill\`) off the thumb drive. The repo code is *not*
+   copied — the program comes from GitHub in Step 7. **Replace `E:` with your thumb drive's
+   letter** if different (check "This PC" in File Explorer):
 
    ```powershell
    $tdrive = "E:"   # <-- change E: to your thumb drive letter if needed
-   Copy-Item "$tdrive\memsearch" "$env:USERPROFILE\memsearch" -Recurse -Force
+   Copy-Item "$tdrive\memsearch\_backfill" "$env:USERPROFILE\memsearch\_backfill" -Recurse -Force
    ```
 
-2. Copy the database recipe (which lives **inside** the repo) into the place the
-   plugin expects it. Paste:
+2. Download the database recipe (the Milvus `docker-compose.yml`) from the cloud fork into
+   the place the plugin expects it. Paste:
 
    ```powershell
    New-Item -ItemType Directory -Force "$env:USERPROFILE\.memsearch\milvus" | Out-Null
-   Copy-Item "$env:USERPROFILE\memsearch\plugins\claude-code\podman\docker-compose.yml" `
-             "$env:USERPROFILE\.memsearch\milvus\docker-compose.yml" -Force
+   Invoke-WebRequest -UseBasicParsing `
+     -Uri "https://raw.githubusercontent.com/wombatfish/memsearch/qmaster-custom/plugins/claude-code/podman/docker-compose.yml" `
+     -OutFile "$env:USERPROFILE\.memsearch\milvus\docker-compose.yml"
    ```
+
+   > **No internet?** The prepared drive carries the recipe at its root — copy it instead:
+   > ```powershell
+   > Copy-Item "$tdrive\docker-compose.yml" "$env:USERPROFILE\.memsearch\milvus\docker-compose.yml" -Force
+   > ```
 
 3. **(Offline installs only — skip if this PC has internet.)** If your drive has
    `milvus-images.tar`, load it so Podman doesn't need to download:
@@ -250,19 +261,26 @@ provider = "onnx"
 "@ | Set-Content -NoNewline "$env:USERPROFILE\.memsearch\config.toml"
 ```
 
-## Step 7 — Install the memsearch program
+## Step 7 — Install the memsearch program (from the cloud fork)
 
-The repo is already on your PC (copied in Step 5), so this is just the install.
+This pulls the fork's `qmaster-custom` branch straight from GitHub and builds it — no
+repo copy needed. (Git, from Step 1, does the fetch.)
 
-1. Install the program from the copied repo folder. Paste:
+1. Install the program. Paste:
 
    ```powershell
-   cd "$env:USERPROFILE\memsearch"
-   uv tool install --force --no-cache ".[onnx]"
+   uv tool install --force --no-cache "memsearch[onnx] @ git+https://github.com/wombatfish/memsearch.git@qmaster-custom"
    ```
 
-   > The `--no-cache` part is important — without it the installer can silently
-   > install an old copy.
+   > `--no-cache` is important — without it the installer can silently reuse an old build.
+   > This installs the **fork** pinned to `qmaster-custom` — *not* the stock PyPI
+   > `memsearch` (which is a different, higher-versioned project).
+
+   > **No internet?** This step fetches and builds the fork from GitHub, and the prepared
+   > drive does **not** carry the memsearch source (only your `_backfill\` data) — so there is
+   > **no offline install** for the program itself; this step needs internet. *(A drive prepped
+   > the old way with the full repo could instead run
+   > `cd "$tdrive\memsearch"; uv tool install --force --no-cache ".[onnx]"`.)*
 
 2. **Check it worked.** Paste:
 
@@ -298,8 +316,8 @@ The repo is already on your PC (copied in Step 5), so this is just the install.
    > inherits `MEMSEARCH_DIR`. Without that variable the plugin falls back to *per-project*
    > memory and the backfill (Step 11) lands in a collection the session never reads.
 
-2. Copy your actual saved memories. They came inside the repo at `_backfill\`
-   (copied to your PC in Step 5). Paste:
+2. Copy your actual saved memories. They were copied off the drive to
+   `~\memsearch\_backfill\` in Step 5. Paste:
 
    ```powershell
    New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude" | Out-Null
@@ -329,18 +347,40 @@ The repo is already on your PC (copied in Step 5), so this is just the install.
 
 ## Step 9 — Add and install the plugin
 
+> ### ⚠️ First, if you restored your `~\.claude` profile from a dotfiles/profiles repo
+>
+> A profile restore carries your **dev machine's** plugin registration with it: a
+> `memsearch-local` marketplace whose source is `D:\Projects\memsearch` — a path that does
+> **not** exist on this PC. Claude Code then can't resolve the plugin, so every memsearch
+> hook fires with an empty `CLAUDE_PLUGIN_ROOT` and **crashes**
+> (`bash "/hooks/session-end.sh": No such file or directory`). Strip the stale entry before
+> installing the real one. In **PowerShell**, check for it:
+>
+> ```powershell
+> Select-String -Path "$env:USERPROFILE\.claude\settings.json" -Pattern "memsearch-local"
+> ```
+>
+> If nothing prints, skip ahead. If it matches, open
+> `"$env:USERPROFILE\.claude\settings.json"` in a text editor and delete **both**:
+>
+> 1. the `"memsearch@memsearch-local": true` line inside `"enabledPlugins"`, and
+> 2. the entire `"memsearch-local": { ... }` block inside `"extraKnownMarketplaces"`.
+>
+> Save. (The correct `memsearch-plugins` marketplace is added in the steps below.) Unsure
+> about the JSON edit? Ask Claude Code to do it for you.
+
 Do this **inside Claude Code**, not in PowerShell.
 
 1. Open **Claude Code**.
-2. Type this and press Enter (adjust the path if you copied the project somewhere else):
+2. Add the plugin marketplace **from the cloud fork, pinned to the `qmaster-custom`
+   branch**. Type this and press Enter:
 
    ```
-   /plugin marketplace add C:\Users\%USERNAME%\memsearch
+   /plugin marketplace add https://github.com/wombatfish/memsearch.git#qmaster-custom
    ```
 
-   > If Claude doesn't accept `%USERNAME%`, type your real Windows username instead,
-   > e.g. `C:\Users\bob\memsearch`. To get the exact path, paste
-   > `echo "$env:USERPROFILE\memsearch"` into PowerShell and use what it prints.
+   > The `#qmaster-custom` suffix pins the branch. Without it you'd get the fork's default
+   > `main` branch, which is not what runs here.
 
 3. Then type and press Enter:
 
@@ -575,6 +615,7 @@ applies and it isn't already set:
 |---|---|
 | `podman ps` shows fewer than 3 containers, or the status line says **UNREACHABLE** | Run `podman machine start` then `cd "$env:USERPROFILE\.memsearch\milvus"; podman compose up -d`. Wait 90 seconds, then start a new Claude session. |
 | Status line says **`ERROR: memsearch not found`** | Re-do Step 7. Make sure you opened a fresh PowerShell window afterwards. |
+| **memsearch hooks crash** with `bash "/hooks/session-end.sh": No such file or directory` (or any `/hooks/*.sh` not found) | Your restored profile carries the dev-box `memsearch-local` marketplace (source `D:\Projects\memsearch`), which is absent here — so the plugin can't load and `CLAUDE_PLUGIN_ROOT` expands to empty. Do the **Step 9 ⚠️ prelude**: remove the `memsearch@memsearch-local` and `memsearch-local` entries from `~\.claude\settings.json`, keep only `memsearch@memsearch-plugins`, then `/reload-plugins`. |
 | Database won't start / Podman errors about memory | Re-do the `.wslconfig` part of Step 4, then run `wsl --shutdown`, wait 10s, and try Step 5 again. |
 | **Podman machine won't initialize/start**, or errors mention **WSL** or **virtualization / hypervisor / VT-x** | Virtualization is almost certainly off — redo **Step 0 part A** (enable it in BIOS/UEFI). Then, in an **Administrator** PowerShell, run `wsl --install --no-distribution`, **restart the PC**, reopen Podman Desktop, and let it initialize. Confirm with `podman machine list` (Step 4.5). |
 | Backfill `search` returns nothing | Double-check the collection name matches the status line exactly (Step 10). Re-run Step 11. |
@@ -593,11 +634,11 @@ applies and it isn't already set:
 
 0. Readiness: virtualization **Enabled** (Task Manager → Performance → CPU); expect UAC + one reboot
 1. Git for Windows → 2. Python (python.org, "Add to PATH") → 3. uv → 4. Podman Desktop (+ `wsl --install --no-distribution` if needed) + `.wslconfig` 8GB → confirm `podman machine list` Running
-5. Copy repo to `~\memsearch` → copy bundled `plugins\claude-code\podman\docker-compose.yml` into `~\.memsearch\milvus\` → `podman compose up -d` → confirm 3 containers
+5. Copy `_backfill\` off drive to `~\memsearch\_backfill\` → download `docker-compose.yml` from the cloud fork into `~\.memsearch\milvus\` → `podman compose up -d` → confirm 3 containers
 6. Create `~\.memsearch\config.toml` (milvus uri + onnx)
-7. `cd ~\memsearch` → `uv tool install --force --no-cache ".[onnx]"` → confirm `memsearch --version`
+7. `uv tool install --force --no-cache "memsearch[onnx] @ git+https://github.com/wombatfish/memsearch.git@qmaster-custom"` → confirm `memsearch --version`
 8. `setx MEMSEARCH_DIR ...` + `setx MEMSEARCH_NO_UPDATE_CHECK 1` + copy `~\memsearch\_backfill\memsearch-global` → `~\.claude\memsearch-global` → fully restart Claude
-9. `/plugin marketplace add` → `/plugin install` → `/reload-plugins` → confirm `[memsearch]` line
+9. `/plugin marketplace add https://github.com/wombatfish/memsearch.git#qmaster-custom` → `/plugin install memsearch@memsearch-plugins` → `/reload-plugins` → confirm `[memsearch]` line
 10–11. Backfill: easiest is to **ask Claude** to read its collection name and run it; or by hand: read collection name → `memsearch watch --stop` then `memsearch index ... --replace` → confirm `memsearch search --no-daemon`
 12. Restart Claude — done.
 13. *(Optional, Claude offers this automatically at the end)* Load **this PC's own** past conversations: copy `_backfill\scripts` → `~\.claude\scripts`, set `MEMSEARCH_BACKFILL_DATE_GUARD` to tomorrow, `memsearch watch --stop`, `python ~\.claude\scripts\memsearch-backfill-claude.py --yes`, verify with `memsearch search --no-daemon`.
