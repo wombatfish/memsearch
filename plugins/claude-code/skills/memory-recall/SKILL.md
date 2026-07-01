@@ -46,7 +46,7 @@ Search for memories relevant to: $ARGUMENTS
    - Run `python3 "${CLAUDE_PLUGIN_ROOT}/transcript.py" <jsonl_path> --turn <uuid> --context 3` to retrieve the original conversation turns. If `python3` is missing or fails at runtime (the Windows store stub passes `command -v` but exits with "Python was not found"), rerun with `python` instead — or use `$MEMSEARCH_PYTHON` if set in the environment.
    - If the anchor format is unfamiliar (e.g. `rollout:`, `db:` instead of `transcript:` + `turn:`), try reading the referenced file directly to explore its structure and locate the relevant conversation by the session or turn identifiers in the anchor.
 
-7. **Return results**: Output a curated summary of the most relevant memories. Be concise — only include information that is genuinely useful for the user's current question.
+7. **Return results**: Output a curated summary of the most relevant memories. Be concise — only include information that is genuinely useful for the user's current question. Ground every stated fact in a chunk you actually searched or expanded — don't assert something as settled fact if it isn't backed by a specific result.
 
 ## When unsure what to search
 
@@ -62,6 +62,8 @@ Once a concrete topic jumps out, go back to `memsearch search` with a specific q
 
 Organize by relevance. For each memory include:
 - The key information (decisions, patterns, solutions, context)
-- Source reference (file name, date) for traceability
+- Source reference (`chunk_hash`, file name, date) for traceability — attribute each claim to the specific result it came from
 
-If nothing relevant is found, simply say "No relevant memories found."
+Calibrate confidence using the returned `score` values, relatively rather than against a fixed cutoff (its scale differs depending on whether the reranker ran): if the best match is a clear outlier — noticeably weaker than the other results, or all candidates cluster low — say so explicitly ("only a weak/low-confidence match") instead of presenting it with unwarranted confidence.
+
+If nothing relevant is found, simply say "No relevant memories found." If results exist but are all weak matches, say so rather than presenting them with false confidence.
