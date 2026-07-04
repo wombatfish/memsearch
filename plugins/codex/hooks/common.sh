@@ -301,21 +301,24 @@ start_watch() {
     return 0
   fi
 
+  # Windows (MSYS/Cygwin): setsid allocates a NEW console for the native
+  # memsearch.exe, popping up a terminal window over other apps. Use nohup
+  # (keeps the hidden bash console, no new window) and pass --detach so the CLI
+  # re-launches itself fully windowless (CREATE_NO_WINDOW). On POSIX, prefer
+  # setsid for proper daemonization; --detach is a Windows-only no-op there.
+  local launch_prefix="nohup" detach_flag=""
+  case "${OS:-}|${OSTYPE:-}" in
+    *Windows_NT*|*msys*|*cygwin*) detach_flag="--detach" ;;
+    *) command -v setsid &>/dev/null && launch_prefix="setsid" ;;
+  esac
+
   # --replace: take over a live incumbent watcher on this collection
   # cross-platform (the bash stop_watch sweep no-ops on Windows). See
   # plugins/claude-code/hooks/common.sh for the rationale.
   if [ -n "$COLLECTION_NAME" ]; then
-    if command -v setsid &>/dev/null; then
-      setsid "${MEMSEARCH_CMD[@]}" watch "$MEMORY_DIR" --collection "$COLLECTION_NAME" --replace ${COLLECTION_DESC:+--description "$COLLECTION_DESC"} </dev/null &>/dev/null &
-    else
-      nohup "${MEMSEARCH_CMD[@]}" watch "$MEMORY_DIR" --collection "$COLLECTION_NAME" --replace ${COLLECTION_DESC:+--description "$COLLECTION_DESC"} </dev/null &>/dev/null &
-    fi
+    $launch_prefix "${MEMSEARCH_CMD[@]}" watch "$MEMORY_DIR" --collection "$COLLECTION_NAME" --replace $detach_flag ${COLLECTION_DESC:+--description "$COLLECTION_DESC"} </dev/null &>/dev/null &
   else
-    if command -v setsid &>/dev/null; then
-      setsid "${MEMSEARCH_CMD[@]}" watch "$MEMORY_DIR" --replace ${COLLECTION_DESC:+--description "$COLLECTION_DESC"} </dev/null &>/dev/null &
-    else
-      nohup "${MEMSEARCH_CMD[@]}" watch "$MEMORY_DIR" --replace ${COLLECTION_DESC:+--description "$COLLECTION_DESC"} </dev/null &>/dev/null &
-    fi
+    $launch_prefix "${MEMSEARCH_CMD[@]}" watch "$MEMORY_DIR" --replace $detach_flag ${COLLECTION_DESC:+--description "$COLLECTION_DESC"} </dev/null &>/dev/null &
   fi
   echo $! > "$WATCH_PIDFILE"
 }

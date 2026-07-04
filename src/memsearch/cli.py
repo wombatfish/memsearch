@@ -703,6 +703,22 @@ def expand(
         _render_expand_result(result, json_output=json_output)
 
 
+def _stdin_noninteractive() -> bool:
+    """True when stdin is not an interactive TTY.
+
+    Session hooks launch ``memsearch watch`` with stdin redirected to
+    ``/dev/null``; a human runs it from a real terminal. Used on Windows to
+    decide whether to auto-detach windowless (see ``_spawn_detached_watch``) so
+    no plugin has to remember ``--detach``. Missing/closed stdin (``None``, a
+    closed stream, or a handle that can't be queried) counts as non-interactive
+    — those are daemon-like contexts too.
+    """
+    try:
+        return not sys.stdin.isatty()
+    except (AttributeError, ValueError, OSError):
+        return True
+
+
 def _spawn_detached_watch() -> None:
     """Re-launch the current ``watch`` invocation as a windowless background
     process (Windows only).
@@ -793,8 +809,15 @@ def watch(
     # the MSYS hook spawns does the minimum and exits fast (see
     # _spawn_detached_watch). Guard: only for a real `watch` (paths, not --stop)
     # and only once (the child carries MEMSEARCH_WATCH_DETACHED=1).
+    #
+    # Auto-detach when stdin is not a TTY: session hooks launch `watch` with
+    # `</dev/null`, so a native console `watch` spawned from a windowless MSYS
+    # shell otherwise pops a fresh terminal window. Keying off the TTY makes the
+    # windowless behaviour automatic for every hook/plugin, so none has to pass
+    # `--detach`. An interactive `memsearch watch <path>` keeps its real TTY and
+    # stays in the foreground; `--detach` remains an explicit override.
     if (
-        detach
+        (detach or _stdin_noninteractive())
         and not stop
         and paths
         and sys.platform == "win32"
