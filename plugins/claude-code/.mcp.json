@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "memsearch": {
+      "command": "python",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/memsearch_mcp.py"]
+    }
+  }
+}

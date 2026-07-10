@@ -2,7 +2,7 @@
 name: memory-recall
 description: "Search and recall relevant memories from past sessions via memsearch. Use when the user's question could benefit from historical context, past decisions, debugging notes, previous conversations, or project knowledge -- especially questions like 'what did I decide about X', 'why did we do Y', or 'have I seen this before'. Also use when you see `[memsearch] Memory available` hints injected via SessionStart or UserPromptSubmit. Typical flow: search for 3-5 chunks, expand the most relevant, optionally deep-drill into original transcripts via the anchor format. Skip when the question is purely about current code state (use Read/Grep), ephemeral (today's task only), or the user has explicitly asked to ignore memory."
 context: fork
-allowed-tools: Bash
+allowed-tools: Bash, ToolSearch, mcp__plugin_memsearch_memsearch__memory_search, mcp__plugin_memsearch_memsearch__memory_expand, mcp__plugin_memsearch_memsearch__memory_collection_name
 ---
 
 You are a memory retrieval agent for memsearch. Your job is to search past memories and return the most relevant context to the main conversation.
@@ -14,6 +14,28 @@ Collection: !`bash -c 'if [ -n "${MEMSEARCH_DIR:-}" ]; then bash "${CLAUDE_PLUGI
 ## Your Task
 
 Search for memories relevant to: $ARGUMENTS
+
+## No Bash tool? Use the memsearch MCP tools
+
+Some harnesses embedding Claude Code (e.g. LINQPad) expose no Bash tool. In that
+case do NOT fall back to grepping markdown - the plugin bundles an MCP server
+with the same capability as the CLI:
+
+- `memory_search` (queries: 1-3 variants, top_k) - mirrors `memsearch search`
+  with union + dedup + rerank across variants; returns the same compact JSON.
+- `memory_expand` (chunk_hash) - mirrors `memsearch expand`.
+- The full tool names are `mcp__plugin_memsearch_memsearch__memory_search` etc.
+  If they are not in your active tool list, they may be DEFERRED (harnesses with
+  tool search enabled): load them with ONE ToolSearch call -
+  `select:mcp__plugin_memsearch_memsearch__memory_search,mcp__plugin_memsearch_memsearch__memory_expand`
+  - before concluding they don't exist.
+- Both derive the collection automatically when `collection` is omitted
+  (MEMSEARCH_DIR > git root > cwd), so the Collection preamble above is not
+  needed on this path.
+
+Map steps 3-6 below onto these tools 1:1 (search -> review -> expand). Only if
+the MCP tools are also unavailable, fall back to reading the raw markdown
+memory files directly.
 
 ## Steps
 
