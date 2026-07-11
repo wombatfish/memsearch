@@ -28,15 +28,11 @@ D1-D4 in
 - Default branch: `main`
 - Required checks: recursive case-folded slug collision, secret/scrub, and
   privacy/policy checks; strict up-to-date-branch enforcement
-- Preferred gate: author-reviewed send, then auto-merge after 24 business hours
-- Secret Protection availability is pending an organization-owner UI check.
-- Security fallback: if private-repository Secret Protection and delegated
-  bypass are unavailable, require one blocking human approval. Do not enable the
-  zero-approval auto-merge gate without the independent Secret Protection layer.
-- When push protection is available, delegated bypass must be restricted to
-  named roles or teams rather than all writers.
-- CODEOWNERS is required for facts and security-critical CI paths when blocking
-  review is active.
+- Review gate: one blocking human approval. The organization owner confirmed on
+  2026-07-11 that Secret Protection is disabled and will remain disabled.
+- Do not enable zero-approval auto-merge without the independent Secret
+  Protection layer.
+- CODEOWNERS is required for facts and security-critical CI paths.
 
 ## D4: old fork disposition
 
@@ -51,6 +47,4 @@ D1-D4 in
 - Step 1 A/B must report before Step 2 starts.
 - Secret scan of the extracted current tree is mandatory. A fresh-start private
   repository avoids importing old history but does not waive scanning the tree.
-- GitHub Secret Protection availability and delegated-bypass behavior must be
-  verified before selecting the preferred zero-approval gate for the facts repo.
 - The old fork cannot be archived before the minimum two-week soak completes.
