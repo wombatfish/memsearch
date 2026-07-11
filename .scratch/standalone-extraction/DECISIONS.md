@@ -1,0 +1,56 @@
+# Standalone extraction decisions
+
+Approved by the user on 2026-07-11. These decisions resolve Part 4 prerequisites
+D1-D4 in
+`C:\Users\dave\.claude\plans\examine-https-github-com-googlecloudplat-transient-nova.md`.
+
+## D1: repository topology and identity
+
+- Code repository: `RobsonSavage/teammem`
+- Visibility: private
+- History: fresh start
+- Ownership: the `RobsonSavage` organization
+- Topology: code and curated facts live in separate repositories
+
+## D2: package, CLI, environment, and tool names
+
+- Python distribution and CLI: `teammem`
+- Retain the `MEMSEARCH_*` environment-variable prefix for compatibility
+- Retain the `memory_search` and `memory_expand` MCP tool names
+- Rename product/plugin/package identities that falsely imply Zilliz ownership;
+  exact registry scopes must be verified before publication and are not guessed
+
+## D3: facts repository and security boundary
+
+- Facts repository: `RobsonSavage/teammem-facts`
+- Visibility: private
+- Initial contents: empty; promotion-only, with no historical digest backfill
+- Default branch: `main`
+- Required checks: recursive case-folded slug collision, secret/scrub, and
+  privacy/policy checks; strict up-to-date-branch enforcement
+- Preferred gate: author-reviewed send, then auto-merge after 24 business hours
+- Secret Protection availability is pending an organization-owner UI check.
+- Security fallback: if private-repository Secret Protection and delegated
+  bypass are unavailable, require one blocking human approval. Do not enable the
+  zero-approval auto-merge gate without the independent Secret Protection layer.
+- When push protection is available, delegated bypass must be restricted to
+  named roles or teams rather than all writers.
+- CODEOWNERS is required for facts and security-critical CI paths when blocking
+  review is active.
+
+## D4: old fork disposition
+
+- Keep `wombatfish/memsearch` live throughout cutover and the minimum two-week
+  soak.
+- After a clean soak, tag the exact pre-cutover commit as the immutable fallback
+  and archive/freeze the old fork; never delete it.
+- The new repository does not carry gsync/upstream version-line discipline.
+
+## Gates still outstanding
+
+- Step 1 A/B must report before Step 2 starts.
+- Secret scan of the extracted current tree is mandatory. A fresh-start private
+  repository avoids importing old history but does not waive scanning the tree.
+- GitHub Secret Protection availability and delegated-bypass behavior must be
+  verified before selecting the preferred zero-approval gate for the facts repo.
+- The old fork cannot be archived before the minimum two-week soak completes.
