@@ -10,7 +10,8 @@ D1-D4 in
 - Repository URL: `https://github.com/RobsonSavage/teammem`
 - Visibility: private
 - History: fresh start
-- Published `main` head after extraction review: `a8e149da3e7f208f2e7a8055d1433ca9adabc8de`
+- Published extraction review head: `a8e149da3e7f208f2e7a8055d1433ca9adabc8de`
+- Cutover soak head: `d60e100cc53ebc7d19a8dfc510ea80fc7162e17d`
 - Ownership: the `RobsonSavage` organization
 - Topology: code and curated facts live in separate repositories
 
@@ -55,6 +56,8 @@ D1-D4 in
 - Secret scans passed for the extracted tree, the staged review-fix diff, and the
   fresh repository history before `main` was published.
 - The private code repository was created and pushed on 2026-07-11.
-- Six-surface cutover validation and the personal-data migration dry run remain
-  outstanding before the soak starts.
+- Six-surface cutover validation and the personal-data migration dry run are
+  complete; OpenClaw was not installed and was therefore N/A per Step 2.3.
+- The minimum two-week soak started at 2026-07-11 21:27
+  Africa/Johannesburg and cannot complete before 2026-07-25 21:27.
 - The old fork cannot be archived before the minimum two-week soak completes.
