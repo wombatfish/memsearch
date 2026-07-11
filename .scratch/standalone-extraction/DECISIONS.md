@@ -7,8 +7,10 @@ D1-D4 in
 ## D1: repository topology and identity
 
 - Code repository: `RobsonSavage/teammem`
+- Repository URL: `https://github.com/RobsonSavage/teammem`
 - Visibility: private
 - History: fresh start
+- Published `main` head after extraction review: `a8e149da3e7f208f2e7a8055d1433ca9adabc8de`
 - Ownership: the `RobsonSavage` organization
 - Topology: code and curated facts live in separate repositories
 
@@ -47,9 +49,12 @@ D1-D4 in
   and archive/freeze the old fork; never delete it.
 - The new repository does not carry gsync/upstream version-line discipline.
 
-## Gates still outstanding
+## Gate status
 
-- Step 1 A/B must report before Step 2 starts.
-- Secret scan of the extracted current tree is mandatory. A fresh-start private
-  repository avoids importing old history but does not waive scanning the tree.
+- Step 1 A/B reported: vector retrieval remains the default; Step 2a was skipped.
+- Secret scans passed for the extracted tree, the staged review-fix diff, and the
+  fresh repository history before `main` was published.
+- The private code repository was created and pushed on 2026-07-11.
+- Six-surface cutover validation and the personal-data migration dry run remain
+  outstanding before the soak starts.
 - The old fork cannot be archived before the minimum two-week soak completes.
