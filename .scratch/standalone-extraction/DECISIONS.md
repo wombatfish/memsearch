@@ -15,10 +15,15 @@ D1-D4 in
 ## D2: package, CLI, environment, and tool names
 
 - Python distribution and CLI: `teammem`
+- Python import namespace: `teammem`
 - Retain the `MEMSEARCH_*` environment-variable prefix for compatibility
 - Retain the `memory_search` and `memory_expand` MCP tool names
 - Rename product/plugin/package identities that falsely imply Zilliz ownership;
   exact registry scopes must be verified before publication and are not guessed
+- License attribution: retain the Zilliz MIT notice and add
+  `Copyright (c) 2026 Robson Savage`
+- Remove the optional Zilliz support-email field; do not publish a replacement
+  address
 
 ## D3: facts repository and security boundary
 
